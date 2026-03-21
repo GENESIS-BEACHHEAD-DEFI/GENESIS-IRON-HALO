@@ -44,11 +44,15 @@ export class DebriefService {
    * Full debrief pipeline: DEBRIEF → SANITISE → EXTRACT → BURN
    * Routes to KRYPTONITE protocol for PHANTOM_STACK operators.
    *
+   * v1.2: Accepts optional AdvisoryVerdict from Blackboard Architecture.
+   * Advisory verdict influences flagging and GTC logging.
+   *
    * GOLDEN RULE: This method ALWAYS ends with burnOperator(). No exceptions.
    */
   async processOperator(
     record: HaloRecord,
     report: OperatorReturnReport,
+    advisoryVerdict?: import("../types").AdvisoryVerdict,
   ): Promise<HaloRecord> {
     const startTime = Date.now();
 
@@ -95,6 +99,28 @@ export class DebriefService {
         `"${report.selfAssessment.improvementSuggestion}" ` +
         `(est. ${report.selfAssessment.estimatedImprovementPercent || 0}% improvement)`,
       );
+    }
+
+    // ── v1.2: Advisory verdict influence ──
+    if (advisoryVerdict) {
+      if (advisoryVerdict.action === "HOLD_MANUAL_REVIEW") {
+        record.flagged = true;
+        record.flagReason = (record.flagReason ? record.flagReason + " | " : "") +
+          `ADVISORY_HOLD: ${advisoryVerdict.reasoning}`;
+        console.log(
+          `[IRON-HALO] ADVISORY_FLAG operator=${record.operatorId} — ` +
+          `Blackboard recommends HOLD_MANUAL_REVIEW`,
+        );
+      }
+      if (advisoryVerdict.action === "QUARANTINE_DARPA") {
+        record.flagged = true;
+        record.flagReason = (record.flagReason ? record.flagReason + " | " : "") +
+          `ADVISORY_DARPA_ESCALATION: ${advisoryVerdict.reasoning}`;
+        console.log(
+          `[IRON-HALO] ██ ADVISORY_DARPA_ESCALATION ██ operator=${record.operatorId} — ` +
+          `Both analysts SUSPICIOUS. Flagged to DARPA.`,
+        );
+      }
     }
 
     // ── Stage 2: SANITISE ──
@@ -330,6 +356,11 @@ export class DebriefService {
         flagReason: record.flagReason,
         unverified: intel.unverified || false,
         crossValidationTags: intel.crossValidationTags || [],
+        // v1.2: Advisory verdict from Blackboard Architecture — full picture
+        advisoryAction: record.advisoryVerdict?.action || null,
+        advisoryReasoning: record.advisoryVerdict?.reasoning || null,
+        advisoryCircuitBreakerTripped: record.advisoryVerdict?.circuitBreakerTripped || false,
+        advisoryInternalOnly: record.advisoryVerdict?.internalRulesOnly || false,
       },
       timestamp: new Date().toISOString(),
     };

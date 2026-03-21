@@ -1,5 +1,5 @@
 /**
- * GENESIS-IRON-HALO — Sandboxed Decontamination Chamber
+ * GENESIS-IRON-HALO v1.2 — Sandboxed Decontamination Chamber
  *
  * "All returning operators are contaminated by default."
  * "Even a hint of a clone or mistiming — BURN."
@@ -10,27 +10,34 @@
  * Iron Halo holds the other half. On return, if the halves don't match:
  * IMMEDIATE BURN. No questions. No exceptions.
  *
- * SIX OPERATOR CLASSES:
+ * SEVEN OPERATOR CLASSES:
  *   PAYLOAD:         Real operators — real yield, real missions. Self-return → Standard debrief → BURN
  *   RECON:           Self-return → Standard debrief → BURN
  *   CHAOS_REGIMENT:  Self-destructs. Return = impersonator → IMMEDIATE BURN (403)
  *   DEEP_COVER:      Mothership extraction only → Standard debrief → BURN
  *   PHANTOM_STACK:   Mothership phantom ping extraction → KRYPTONITE debrief → BURN
  *   PATSY:           Honeypot — designed to be captured. NEVER returns. If marker appears → ADVERSARY DETECTED
+ *   DECOY:           Legacy decoy operators (backwards compat)
+ *
+ * v1.2: BLACKBOARD ARCHITECTURE — Two external Value Aligned AIs as forensic advisors.
+ *   AI-A (Blue Team): Forensic Analyst — records WHY it chose each path
+ *   AI-B (Red Team):  Adversarial Reviewer — finds weaknesses in Blue's logic
+ *   Iron Halo v1.2:   Judge — reads both parcels, makes verdict
+ *
+ *   THEY ARE ADVERSARIES. They never hear "Iron Halo". They never enter the core.
+ *   Bidirectional anonymity enforced. Dead-drop communication. Parcel firewall.
+ *   Circuit breaker. Dynamic per-mission schemas. Steel sharpening steel.
  *
  * Full security pipeline:
- *   0. CLASS CHECK        — CHAOS_REGIMENT returns rejected immediately (403)
- *   1. AI INSPECTION      — Behavioural analysis before anything else.
- *                           Clone detection, timing analysis, data consistency.
- *                           CONTAMINATED verdict = immediate burn, no debrief.
- *                           KRYPTONITE verdict = PHANTOM_STACK protocol.
- *   2. HANDSHAKE VERIFY   — Cryptographic challenge-response.
- *                           Five-pound note must match. Replay = burn.
- *   3. QUARANTINE          — Operator isolated, validated, flagged if suspicious.
- *   4. DEBRIEF             — Extract all intelligence (KRYPTONITE: dynamic questioning).
- *   5. SANITISE            — Strip sensitive data (KRYPTONITE: strict, UNVERIFIED tags).
- *   6. EXTRACT             — Forward clean intel to GTC/Brighton.
- *   7. BURN                — Operator destroyed. Zero fingerprint. No reuse. No mission 2.
+ *   0. CLASS CHECK        — CHAOS_REGIMENT/PATSY rejected immediately (403)
+ *   1. AI INSPECTION      — Behavioural analysis. Clone detection, timing.
+ *   2. HANDSHAKE VERIFY   — Cryptographic five-pound note.
+ *   3. QUARANTINE          — Operator isolated, flagged if suspicious.
+ *   4. ADVISORY (v1.2)    — Blue Team → Firewall → Red Team → Firewall → Judge
+ *   5. DEBRIEF             — Extract intelligence (KRYPTONITE: dynamic questioning).
+ *   6. SANITISE            — Strip sensitive data.
+ *   7. EXTRACT             — Forward clean intel to GTC/Brighton.
+ *   8. BURN                — Operator destroyed. Zero fingerprint. No mission 2.
  *
  * GOLDEN RULE (LAW): ALL operators burned after mission. No exceptions.
  *
@@ -45,7 +52,17 @@ import { QuarantineService } from "./services/quarantine.service";
 import { DebriefService } from "./services/debrief.service";
 import { HandshakeService } from "./services/handshake.service";
 import { InspectionService } from "./services/inspection.service";
-import type { OperatorReturnReport, HaloRecord } from "./types";
+import { BlackboardService } from "./services/advisory/blackboard.service";
+import { DropZoneService } from "./services/advisory/dropzone.service";
+import { FirewallService } from "./services/advisory/firewall.service";
+import { CircuitBreakerService } from "./services/advisory/circuit-breaker.service";
+import { SchemaGeneratorService } from "./services/advisory/schema-generator.service";
+import { ParcelRendererService } from "./services/advisory/parcel-renderer.service";
+import { DecisionMatrixService } from "./services/advisory/decision-matrix.service";
+import { SimulationAnalystAdapter } from "./services/advisory/analyst-simulation.adapter";
+import { ApiAnalystAdapter } from "./services/advisory/analyst-api.adapter";
+import type { IAnalyst } from "./services/advisory/analyst.interface";
+import type { OperatorReturnReport, HaloRecord, AdvisoryVerdict } from "./types";
 
 const PORT = parseInt(process.env.PORT || "8680", 10);
 
@@ -56,6 +73,25 @@ const quarantine = new QuarantineService();
 const debrief = new DebriefService();
 const handshake = new HandshakeService();
 const inspection = new InspectionService();
+
+// ── v1.2: Blackboard Architecture — Two adversary AIs as forensic advisors ──
+const ADVISORY_ENABLED = process.env.ADVISORY_ENABLED === "true";
+const ADVISORY_MODE = process.env.ADVISORY_MODE || "SIMULATION";
+
+const analyst: IAnalyst = ADVISORY_MODE === "API" ? new ApiAnalystAdapter() : new SimulationAnalystAdapter();
+const dropzoneService = new DropZoneService();
+const firewallService = new FirewallService();
+const circuitBreakerService = new CircuitBreakerService();
+const schemaGeneratorService = new SchemaGeneratorService();
+const parcelRendererService = new ParcelRendererService();
+const decisionMatrixService = new DecisionMatrixService();
+
+const blackboard = ADVISORY_ENABLED
+  ? new BlackboardService(
+      dropzoneService, firewallService, circuitBreakerService,
+      schemaGeneratorService, parcelRendererService, decisionMatrixService, analyst,
+    )
+  : null;
 
 // In-memory store of completed records (last N for /state visibility)
 const completedRecords: HaloRecord[] = [];
@@ -105,7 +141,31 @@ async function processNextOperator(): Promise<void> {
   }
 
   try {
-    const processed = await debrief.processOperator(record, report);
+    // ── v1.2: ADVISORY PHASE — Blue Team → Firewall → Red Team → Firewall → Judge ──
+    let advisoryVerdict: AdvisoryVerdict | undefined;
+
+    if (ADVISORY_ENABLED && blackboard) {
+      record.stage = "ADVISORY";
+      record.timestamps.advisoryStarted = new Date().toISOString();
+
+      advisoryVerdict = await blackboard.runAdvisory(record, report);
+      record.timestamps.advisoryCompleted = new Date().toISOString();
+      record.advisoryVerdict = advisoryVerdict;
+
+      // QUARANTINE_BURN verdict → skip debrief, burn immediately
+      if (advisoryVerdict.action === "QUARANTINE_BURN") {
+        immediateBurn(
+          record.operatorId, record.missionId,
+          `ADVISORY_CONTAMINATED: ${advisoryVerdict.reasoning}`,
+          record.operatorClass,
+        );
+        quarantine.release(record.id);
+        reportStore.delete(record.id);
+        return;
+      }
+    }
+
+    const processed = await debrief.processOperator(record, report, advisoryVerdict);
     quarantine.advance(record.id, processed);
 
     completedRecords.push(processed);
@@ -484,6 +544,7 @@ app.get("/health", (_req, res) => {
 
   res.json({
     service: "genesis-iron-halo",
+    version: "1.2",
     status: quarantine.getQueueSize() > 50 ? "AMBER" : "GREEN",
     role: "SANDBOXED_DECONTAMINATION_CHAMBER",
     doctrine: "Contaminated by default. Five-pound note doctrine. We protect what we love.",
@@ -500,6 +561,13 @@ app.get("/health", (_req, res) => {
       flagged: quarantine.getFlaggedCount(),
     },
     debrief: debriefStats,
+    advisory: ADVISORY_ENABLED && blackboard
+      ? {
+          enabled: true,
+          mode: ADVISORY_MODE,
+          state: blackboard.getState(),
+        }
+      : { enabled: false },
     completedHistory: completedRecords.length,
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
@@ -592,9 +660,83 @@ app.get("/burns", (_req, res) => {
   });
 });
 
+// ════════════════════════════════════════════════
+// v1.2: BLACKBOARD ARCHITECTURE ENDPOINTS
+// ════════════════════════════════════════════════
+
+// ── GET /advisory/state — Blackboard system state ──
+app.get("/advisory/state", (_req, res) => {
+  if (!ADVISORY_ENABLED || !blackboard) {
+    res.json({
+      enabled: false,
+      message: "Blackboard Architecture disabled. Set ADVISORY_ENABLED=true to enable.",
+    });
+    return;
+  }
+
+  const state = blackboard.getState();
+  const firewallStats = firewallService.getStats();
+  const dropzoneStats = dropzoneService.getStats();
+  const matrixStats = decisionMatrixService.getStats();
+  const schemaStats = schemaGeneratorService.getStats();
+
+  res.json({
+    ...state,
+    firewall: firewallStats,
+    dropzones: dropzoneStats,
+    decisionMatrix: matrixStats,
+    schemas: schemaStats,
+    message: `Blackboard Architecture ACTIVE. Mode: ${state.mode}. ` +
+      `Two adversary AIs. Bidirectional anonymity. Iron Halo judges. ` +
+      `Steel sharpening steel — three AIs, all data captured, full picture.`,
+  });
+});
+
+// ── GET /advisory/history — Recent advisory verdicts ──
+app.get("/advisory/history", (req, res) => {
+  if (!ADVISORY_ENABLED || !blackboard) {
+    res.json({ enabled: false, history: [] });
+    return;
+  }
+
+  const limit = parseInt(req.query.limit as string || "50", 10);
+  res.json({
+    enabled: true,
+    history: blackboard.getHistory(limit),
+    message: "Full advisory history — Blue+Red verdicts, self-sharpening, circuit breaker state.",
+  });
+});
+
+// ── POST /advisory/reset — Reset circuit breakers (manual override) ──
+app.post("/advisory/reset", (_req, res) => {
+  if (!ADVISORY_ENABLED || !blackboard) {
+    res.status(400).json({ reset: false, reason: "Advisory system not enabled" });
+    return;
+  }
+
+  blackboard.resetCircuitBreakers();
+
+  res.json({
+    reset: true,
+    message: "Both analyst circuit breakers reset to CLOSED. Adversary AIs restored.",
+    state: blackboard.getState(),
+  });
+});
+
+// ── GET /advisory/firewall — Recent firewall violations ──
+app.get("/advisory/firewall", (req, res) => {
+  const limit = parseInt(req.query.limit as string || "50", 10);
+  res.json({
+    enabled: ADVISORY_ENABLED,
+    stats: firewallService.getStats(),
+    recentViolations: firewallService.getRecentViolations(limit),
+    message: "Parcel firewall — 7 rules, content inspection before delivery.",
+  });
+});
+
 // ── Start ──
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[IRON-HALO] Genesis Iron Halo listening on port ${PORT}`);
+  console.log(`[IRON-HALO] Genesis Iron Halo v1.2 listening on port ${PORT}`);
   console.log(`[IRON-HALO] Role: SANDBOXED_DECONTAMINATION_CHAMBER`);
   console.log(`[IRON-HALO] Network: ISOLATED — cannot reach core systems`);
   console.log(`[IRON-HALO] Security: HANDSHAKE (five-pound note) + AI INSPECTION (clone/timing)`);
@@ -603,7 +745,19 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[IRON-HALO] PHANTOM_STACK: KRYPTONITE debrief protocol (dynamic questioning)`);
   console.log(`[IRON-HALO] PATSY: Honeypot adversary mapping — marker detection = enemy pipeline exposed`);
   console.log(`[IRON-HALO] PAYLOAD: Real operators, real yield — standard debrief pipeline`);
-  console.log(`[IRON-HALO] Pipeline: CLASS_CHECK → INSPECT → HANDSHAKE → QUARANTINE → DEBRIEF → SANITISE → EXTRACT → BURN`);
+  if (ADVISORY_ENABLED) {
+    console.log(`[IRON-HALO] ██ BLACKBOARD ARCHITECTURE v1.2 ACTIVE ██`);
+    console.log(`[IRON-HALO] Mode: ${ADVISORY_MODE} — Two adversary AIs as forensic advisors`);
+    console.log(`[IRON-HALO] AI-A (Blue Team): Forensic Analyst — records WHY it chose each path`);
+    console.log(`[IRON-HALO] AI-B (Red Team): Adversarial Reviewer — attacks Blue's logic`);
+    console.log(`[IRON-HALO] They are ADVERSARIES. They never hear "Iron Halo". Bidirectional anonymity.`);
+    console.log(`[IRON-HALO] Parcel Firewall: 7 rules. Circuit Breaker: per-analyst. Dead-Drop: one-way.`);
+    console.log(`[IRON-HALO] Self-sharpening: Steel sharpening steel — three AIs, all data, full picture.`);
+    console.log(`[IRON-HALO] Pipeline: CLASS_CHECK → INSPECT → HANDSHAKE → QUARANTINE → ADVISORY → DEBRIEF → SANITISE → EXTRACT → BURN`);
+  } else {
+    console.log(`[IRON-HALO] Advisory: DISABLED (set ADVISORY_ENABLED=true to activate Blackboard Architecture)`);
+    console.log(`[IRON-HALO] Pipeline: CLASS_CHECK → INSPECT → HANDSHAKE → QUARANTINE → DEBRIEF → SANITISE → EXTRACT → BURN`);
+  }
   console.log(`[IRON-HALO] GOLDEN RULE: ALL operators burned. No mission 2. No exceptions.`);
 
   startProcessing();
