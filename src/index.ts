@@ -734,6 +734,79 @@ app.get("/advisory/firewall", (req, res) => {
   });
 });
 
+// ════════════════════════════════════════════════
+// RED TEAM INTEGRATION — Receives decontaminated attack reports
+// from Red Aggressor Force via Blackboard protocol.
+// Treated as KRYPTONITE — logged to GTC, danger alerts forwarded.
+// ════════════════════════════════════════════════
+
+app.post("/red-team/ingest", (req, res) => {
+  const body = req.body;
+
+  if (!body || !body.campaignId) {
+    res.status(400).json({ accepted: false, reason: "Required: campaignId" });
+    return;
+  }
+
+  // Log to GTC as RED_TEAM_REPORT event
+  const GTC_URL_RT = process.env.GTC_URL || "http://genesis-beachhead-gtc:8650";
+  fetch(`${GTC_URL_RT}/telemetry/append`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      eventType: "RED_TEAM_REPORT",
+      source: "genesis-iron-halo-red-team",
+      eventId: `red-team-${body.campaignId}`,
+      payload: {
+        campaignId: body.campaignId,
+        type: body.type,
+        dangerLevel: body.dangerLevel,
+        findingCount: body.findings?.length || 0,
+        scoreCount: body.scores?.length || 0,
+        completedAt: body.completedAt,
+      },
+      timestamp: new Date().toISOString(),
+    }),
+    signal: AbortSignal.timeout(5000),
+  }).catch(() => {});
+
+  // If danger detected → additional alert event
+  if (body.dangerLevel === "DANGER_HIGH" || body.dangerLevel === "DANGER_MEDIUM") {
+    fetch(`${GTC_URL_RT}/telemetry/append`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        eventType: "RED_TEAM_DANGER_ALERT",
+        source: "genesis-iron-halo-red-team",
+        eventId: `red-team-danger-${body.campaignId}`,
+        payload: {
+          campaignId: body.campaignId,
+          dangerLevel: body.dangerLevel,
+          findings: body.findings,
+        },
+        timestamp: new Date().toISOString(),
+      }),
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => {});
+
+    console.error(
+      `[IRON-HALO] ██ RED TEAM DANGER ██ campaign=${body.campaignId} ` +
+      `level=${body.dangerLevel} findings=${body.findings?.length || 0}`,
+    );
+  }
+
+  console.log(
+    `[IRON-HALO] RED_TEAM_REPORT_RECEIVED campaign=${body.campaignId} ` +
+    `type=${body.type} danger=${body.dangerLevel}`,
+  );
+
+  res.status(200).json({
+    accepted: true,
+    campaignId: body.campaignId,
+    message: "Red team report received and logged. KRYPTONITE handling applied.",
+  });
+});
+
 // ── Start ──
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[IRON-HALO] Genesis Iron Halo v1.2 listening on port ${PORT}`);
