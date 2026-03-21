@@ -13,22 +13,34 @@
  *   3. BEHAVIOUR ANOMALY — P&L doesn't match conditions, narrative contradicts data
  *   4. REPLAY DETECTION  — seen-before mission IDs, recycled observation text
  *   5. SEQUENCE ANALYSIS — operator history, pattern breaks, sudden behaviour change
+ *   6. CHAOS_REGIMENT RETURN — This class self-destructs. Return = impersonator. +80 score.
+ *   7. UNAUTHORIZED SELF-RETURN — DEEP_COVER/PHANTOM_STACK without extractedByMothership. +60 score.
+ *   8. PHANTOM_STACK AUTO-KRYPTONITE — Always KRYPTONITE contamination level.
+ *   9. PATSY MARKER DETECTION — No PATSY ever comes home. If marker detected = ADVERSARY CLONED US.
+ *      Triggers adversary pipeline mapping. We trace their process. They think they're winning.
+ *  10. PATSY RETURN REJECTION — Like CHAOS, PATSYs never return. +90 score if class = PATSY.
  *
- * Verdict: CLEAN, SUSPICIOUS, or CONTAMINATED
- *   CLEAN        → proceed to debrief
- *   SUSPICIOUS   → flag + proceed (extra scrutiny)
- *   CONTAMINATED → IMMEDIATE BURN. No debrief. No intel extracted. Destroyed.
+ * Verdict: CLEAN, SUSPICIOUS, CONTAMINATED, KRYPTONITE, or ADVERSARY_DETECTED
+ *   CLEAN              → proceed to debrief
+ *   SUSPICIOUS         → flag + proceed (extra scrutiny)
+ *   CONTAMINATED       → IMMEDIATE BURN. No debrief. No intel extracted. Destroyed.
+ *   KRYPTONITE         → PHANTOM_STACK: admit to KRYPTONITE quarantine → dynamic debrief → strict sanitise → burn
+ *   ADVERSARY_DETECTED → PATSY marker found. Enemy cloned our operator. Map their pipeline. BURN the clone.
  */
 
-import type { OperatorReturnReport } from "../types";
+import type { OperatorReturnReport, OperatorClass } from "../types";
 
-export type InspectionVerdict = "CLEAN" | "SUSPICIOUS" | "CONTAMINATED";
+export type InspectionVerdict = "CLEAN" | "SUSPICIOUS" | "CONTAMINATED" | "KRYPTONITE" | "ADVERSARY_DETECTED";
 
 export interface InspectionResult {
   verdict: InspectionVerdict;
   score: number;           // 0-100 (0 = definitely clean, 100 = definitely contaminated)
   checks: InspectionCheck[];
   recommendation: string;
+  /** Operator class detected from the report */
+  operatorClass?: OperatorClass;
+  /** PATSY marker detected — adversary cloned our operator */
+  patsyMarkerDetected?: boolean;
 }
 
 export interface InspectionCheck {
@@ -47,6 +59,18 @@ export class InspectionService {
   private totalClean = 0;
   private totalSuspicious = 0;
   private totalContaminated = 0;
+  private totalKryptonite = 0;
+  private totalAdversaryDetected = 0;
+  /** Known PATSY markers issued by Mothership — only our stack knows these */
+  private knownPatsyMarkers: Set<string> = new Set();
+
+  /**
+   * Register a PATSY marker. Called when Mothership deploys a PATSY.
+   * Only our stack knows these markers — the adversary copies them blindly.
+   */
+  registerPatsyMarker(marker: string): void {
+    this.knownPatsyMarkers.add(marker);
+  }
 
   /**
    * Full AI inspection of a returning operator.
@@ -56,6 +80,85 @@ export class InspectionService {
     this.totalInspected++;
     const checks: InspectionCheck[] = [];
     let contaminationScore = 0;
+    const operatorClass = report.operatorClass;
+    let patsyMarkerDetected = false;
+
+    // ══════════════════════════════════════════════════
+    // CLASS-SPECIFIC CHECK: CHAOS_REGIMENT RETURN REJECTION
+    // This class self-destructs. If it's "returning" — it's an impersonator.
+    // ══════════════════════════════════════════════════
+    if (operatorClass === "CHAOS_REGIMENT") {
+      checks.push({
+        name: "CHAOS_REGIMENT_RETURN",
+        passed: false,
+        severity: "CRITICAL",
+        detail: "CHAOS_REGIMENT operators self-destruct. Return = impersonator or compromised. IMMEDIATE BURN.",
+      });
+      contaminationScore += 80;
+    }
+
+    // ══════════════════════════════════════════════════
+    // CLASS-SPECIFIC CHECK: PATSY RETURN REJECTION
+    // No PATSY ever comes home. Like CHAOS, it's designed to be taken.
+    // If operatorClass = PATSY, it's either our PATSY somehow returning
+    // (impossible — they don't know how) or enemy testing us. Either way: BURN.
+    // ══════════════════════════════════════════════════
+    if (operatorClass === "PATSY") {
+      checks.push({
+        name: "PATSY_RETURN",
+        passed: false,
+        severity: "CRITICAL",
+        detail: "PATSY operators are designed to be captured. They never return. IMMEDIATE BURN.",
+      });
+      contaminationScore += 90;
+    }
+
+    // ══════════════════════════════════════════════════
+    // PATSY MARKER DETECTION — ADVERSARY MAPPING TRIGGER
+    // If an operator arrives carrying a known PATSY marker, the adversary
+    // captured our PATSY, cloned it, and sent the clone to us.
+    // They think they're winning. We now map their pipeline.
+    // ══════════════════════════════════════════════════
+    if (report.patsyMarker && this.knownPatsyMarkers.has(report.patsyMarker)) {
+      patsyMarkerDetected = true;
+      checks.push({
+        name: "PATSY_MARKER_ADVERSARY_DETECTED",
+        passed: false,
+        severity: "CRITICAL",
+        detail: `██ ADVERSARY DETECTED ██ Known PATSY marker found on returning operator. ` +
+          `The enemy captured and cloned our PATSY. We are now mapping their pipeline. ` +
+          `They think they are winning. Marker: ${report.patsyMarker.slice(0, 8)}...`,
+      });
+      // Don't add contamination score — we WANT to log this, not just burn
+      // The verdict will be ADVERSARY_DETECTED which triggers special handling
+      this.totalAdversaryDetected++;
+      console.error(
+        `[IRON-HALO] ██████████████████████████████████████████████████\n` +
+        `[IRON-HALO] ██ ADVERSARY DETECTED — PATSY MARKER FOUND ██\n` +
+        `[IRON-HALO] ██ Operator: ${report.operatorId}\n` +
+        `[IRON-HALO] ██ Marker: ${report.patsyMarker.slice(0, 16)}...\n` +
+        `[IRON-HALO] ██ The enemy cloned our PATSY. Mapping their pipeline.\n` +
+        `[IRON-HALO] ██████████████████████████████████████████████████`,
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // CLASS-SPECIFIC CHECK: UNAUTHORIZED SELF-RETURN
+    // DEEP_COVER and PHANTOM_STACK must be extracted by Mothership.
+    // Self-return without extractedByMothership = compromised.
+    // ══════════════════════════════════════════════════
+    if (
+      (operatorClass === "DEEP_COVER" || operatorClass === "PHANTOM_STACK") &&
+      !report.extractedByMothership
+    ) {
+      checks.push({
+        name: "UNAUTHORIZED_SELF_RETURN",
+        passed: false,
+        severity: "CRITICAL",
+        detail: `${operatorClass} returned without Mothership extraction. Possible compromise or impersonator.`,
+      });
+      contaminationScore += 60;
+    }
 
     // ── Check 1: TIMING ANALYSIS ──
     const duration = report.operatorMeta.missionDurationMs;
@@ -224,7 +327,28 @@ export class InspectionService {
     let verdict: InspectionVerdict;
     let recommendation: string;
 
-    if (contaminationScore >= 50) {
+    // ADVERSARY_DETECTED — PATSY marker found. Highest priority verdict.
+    // We don't just burn — we log everything about this clone for adversary mapping.
+    if (patsyMarkerDetected) {
+      verdict = "ADVERSARY_DETECTED";
+      recommendation = "ADVERSARY CLONE DETECTED. PATSY marker identified. Log all metadata for adversary pipeline mapping. BURN the clone.";
+      // totalAdversaryDetected already incremented above
+      console.error(
+        `[IRON-HALO] INSPECTION: ADVERSARY_DETECTED operator=${report.operatorId} ` +
+        `score=${contaminationScore}/100 — PATSY marker found. Enemy pipeline exposed.`,
+      );
+    } else
+    // PHANTOM_STACK auto-KRYPTONITE — regardless of score, these get KRYPTONITE processing
+    // (unless they're already CONTAMINATED from other checks)
+    if (operatorClass === "PHANTOM_STACK" && contaminationScore < 50) {
+      verdict = "KRYPTONITE";
+      recommendation = "PHANTOM_STACK operator. KRYPTONITE debrief protocol: dynamic questioning, cross-validation, strict sanitise, UNVERIFIED tags. BURN after.";
+      this.totalKryptonite++;
+      console.log(
+        `[IRON-HALO] INSPECTION: KRYPTONITE operator=${report.operatorId} ` +
+        `score=${contaminationScore}/100 — PHANTOM_STACK auto-KRYPTONITE protocol`,
+      );
+    } else if (contaminationScore >= 50) {
       verdict = "CONTAMINATED";
       recommendation = "IMMEDIATE BURN. Do not debrief. Do not extract intel. Destroy operator.";
       this.totalContaminated++;
@@ -263,6 +387,8 @@ export class InspectionService {
       score: contaminationScore,
       checks,
       recommendation,
+      operatorClass,
+      patsyMarkerDetected,
     };
   }
 
@@ -276,12 +402,18 @@ export class InspectionService {
     totalClean: number;
     totalSuspicious: number;
     totalContaminated: number;
+    totalKryptonite: number;
+    totalAdversaryDetected: number;
+    knownPatsyMarkers: number;
   } {
     return {
       totalInspected: this.totalInspected,
       totalClean: this.totalClean,
       totalSuspicious: this.totalSuspicious,
       totalContaminated: this.totalContaminated,
+      totalKryptonite: this.totalKryptonite,
+      totalAdversaryDetected: this.totalAdversaryDetected,
+      knownPatsyMarkers: this.knownPatsyMarkers.size,
     };
   }
 }

@@ -65,12 +65,19 @@ export class HandshakeService {
    * Called by DARPA when dispatching an operator.
    * Returns both halves — DARPA gives operatorToken to the operator,
    * haloToken stays in Iron Halo's vault.
+   *
+   * @param expiryMs — Optional per-class expiry override:
+   *   RECON:         7 days  (604800000)
+   *   DEEP_COVER:    30 days (2592000000)
+   *   PHANTOM_STACK: 90 days (7776000000)
+   *   Default:       2 hours (TOKEN_EXPIRY_MS)
    */
-  issue(operatorId: string, missionId: string): {
+  issue(operatorId: string, missionId: string, expiryMs?: number): {
     operatorToken: string;
     haloToken: string;
   } {
     const key = `${operatorId}:${missionId}`;
+    const effectiveExpiry = expiryMs || TOKEN_EXPIRY_MS;
 
     // Generate two random halves
     const operatorHalf = randomBytes(32).toString("hex");
@@ -90,7 +97,7 @@ export class HandshakeService {
       verificationHash,
       issuedAt: now.toISOString(),
       used: false,
-      expiresAt: new Date(now.getTime() + TOKEN_EXPIRY_MS).toISOString(),
+      expiresAt: new Date(now.getTime() + effectiveExpiry).toISOString(),
     };
 
     this.vault.set(key, token);
@@ -98,7 +105,7 @@ export class HandshakeService {
 
     console.log(
       `[IRON-HALO] HANDSHAKE_ISSUED operator=${operatorId} mission=${missionId} ` +
-      `expires=${token.expiresAt}`,
+      `expiryMs=${effectiveExpiry} expires=${token.expiresAt}`,
     );
 
     return {

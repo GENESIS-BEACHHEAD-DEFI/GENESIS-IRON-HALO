@@ -10,20 +10,29 @@
  * Iron Halo holds the other half. On return, if the halves don't match:
  * IMMEDIATE BURN. No questions. No exceptions.
  *
+ * SIX OPERATOR CLASSES:
+ *   PAYLOAD:         Real operators — real yield, real missions. Self-return → Standard debrief → BURN
+ *   RECON:           Self-return → Standard debrief → BURN
+ *   CHAOS_REGIMENT:  Self-destructs. Return = impersonator → IMMEDIATE BURN (403)
+ *   DEEP_COVER:      Mothership extraction only → Standard debrief → BURN
+ *   PHANTOM_STACK:   Mothership phantom ping extraction → KRYPTONITE debrief → BURN
+ *   PATSY:           Honeypot — designed to be captured. NEVER returns. If marker appears → ADVERSARY DETECTED
+ *
  * Full security pipeline:
+ *   0. CLASS CHECK        — CHAOS_REGIMENT returns rejected immediately (403)
  *   1. AI INSPECTION      — Behavioural analysis before anything else.
  *                           Clone detection, timing analysis, data consistency.
  *                           CONTAMINATED verdict = immediate burn, no debrief.
+ *                           KRYPTONITE verdict = PHANTOM_STACK protocol.
  *   2. HANDSHAKE VERIFY   — Cryptographic challenge-response.
  *                           Five-pound note must match. Replay = burn.
  *   3. QUARANTINE          — Operator isolated, validated, flagged if suspicious.
- *   4. DEBRIEF             — Extract all intelligence.
- *   5. SANITISE            — Strip sensitive data.
+ *   4. DEBRIEF             — Extract all intelligence (KRYPTONITE: dynamic questioning).
+ *   5. SANITISE            — Strip sensitive data (KRYPTONITE: strict, UNVERIFIED tags).
  *   6. EXTRACT             — Forward clean intel to GTC/Brighton.
- *   7. BURN                — Operator destroyed. Zero fingerprint. No reuse.
+ *   7. BURN                — Operator destroyed. Zero fingerprint. No reuse. No mission 2.
  *
- * Intel never dies. Operator is disposable. Knowledge is immortal.
- * Nothing gets past Iron Halo unless we want it to.
+ * GOLDEN RULE (LAW): ALL operators burned after mission. No exceptions.
  *
  * Network: ISOLATED — cannot reach core systems.
  * Communication: ONE-WAY POST to GTC/Brighton only.
@@ -56,10 +65,23 @@ const MAX_COMPLETED_HISTORY = 500;
 const burnLog: Array<{
   operatorId: string;
   missionId: string;
+  operatorClass?: string;
   reason: string;
   burnedAt: string;
 }> = [];
 const MAX_BURN_LOG = 500;
+
+// Adversary detection log — PATSY markers that arrived at Iron Halo
+// Each entry = the enemy cloned our PATSY and sent it back. We map them.
+const adversaryLog: Array<{
+  operatorId: string;
+  missionId: string;
+  patsyMarker: string;
+  sourceIp?: string;
+  detectedAt: string;
+  metadata: Record<string, unknown>;
+}> = [];
+const MAX_ADVERSARY_LOG = 200;
 
 // In-memory store of return reports (keyed by halo record ID, for debrief)
 const reportStore: Map<string, OperatorReturnReport> = new Map();
@@ -110,31 +132,33 @@ function startProcessing(): void {
   setInterval(() => handshake.purgeExpired(), PURGE_INTERVAL_MS);
 }
 
-function immediateBurn(operatorId: string, missionId: string, reason: string): void {
+function immediateBurn(operatorId: string, missionId: string, reason: string, operatorClass?: string): void {
   burnLog.push({
     operatorId,
     missionId,
+    operatorClass,
     reason,
     burnedAt: new Date().toISOString(),
   });
   if (burnLog.length > MAX_BURN_LOG) burnLog.shift();
 
   console.error(
-    `[IRON-HALO] ██ IMMEDIATE BURN ██ operator=${operatorId} mission=${missionId} — ${reason}`,
+    `[IRON-HALO] ██ IMMEDIATE BURN ██ operator=${operatorId} mission=${missionId} ` +
+    `class=${operatorClass || "UNKNOWN"} — ${reason}`,
   );
 }
 
 // ── POST /handshake/issue — DARPA issues handshake tokens before dispatch ──
-// Called by DARPA when deploying an operator. Returns both halves.
+// Called by DARPA/Mothership when deploying an operator. Returns both halves.
 app.post("/handshake/issue", (req, res) => {
-  const { operatorId, missionId } = req.body;
+  const { operatorId, missionId, expiryMs } = req.body;
 
   if (!operatorId || !missionId) {
     res.status(400).json({ issued: false, reason: "Required: operatorId, missionId" });
     return;
   }
 
-  const tokens = handshake.issue(operatorId, missionId);
+  const tokens = handshake.issue(operatorId, missionId, expiryMs);
 
   res.status(200).json({
     issued: true,
@@ -177,21 +201,125 @@ app.post("/return", (req, res) => {
   }
 
   // ════════════════════════════════════════════════
+  // GATE 0: CHAOS_REGIMENT EARLY REJECTION
+  // This class self-destructs. If it's trying to "return" — it's an impersonator.
+  // No inspection. No handshake. IMMEDIATE BURN. 403.
+  // ════════════════════════════════════════════════
+  if (report.operatorClass === "CHAOS_REGIMENT") {
+    immediateBurn(
+      report.operatorId,
+      report.missionId,
+      "CHAOS_REGIMENT operators self-destruct. Return = impersonator. IMMEDIATE BURN.",
+      "CHAOS_REGIMENT",
+    );
+
+    res.status(403).json({
+      accepted: false,
+      burned: true,
+      operatorClass: "CHAOS_REGIMENT",
+      reason: "CHAOS_REGIMENT operators self-destruct on mission. This class NEVER returns. " +
+        "If you're trying to return — you're an impersonator. BURNED.",
+    });
+    return;
+  }
+
+  // ════════════════════════════════════════════════
+  // GATE 0B: PATSY EARLY REJECTION
+  // No PATSY ever comes home. They're designed to be captured.
+  // If operatorClass explicitly says PATSY — immediate burn.
+  // (PATSY marker detection happens in inspection for clones that
+  //  don't declare themselves as PATSY but carry the marker.)
+  // ════════════════════════════════════════════════
+  if (report.operatorClass === "PATSY") {
+    immediateBurn(
+      report.operatorId,
+      report.missionId,
+      "PATSY operators are designed to be captured. They never return. IMMEDIATE BURN.",
+      "PATSY",
+    );
+
+    res.status(403).json({
+      accepted: false,
+      burned: true,
+      operatorClass: "PATSY",
+      reason: "PATSY operators are honeypots — designed to be captured and cloned. " +
+        "This class NEVER returns. BURNED.",
+    });
+    return;
+  }
+
+  // ════════════════════════════════════════════════
   // GATE 1: AI INSPECTION — Before anything else
   // "Even a hint of a clone or mistiming — BURN"
+  // Now class-aware: KRYPTONITE verdict for PHANTOM_STACK
   // ════════════════════════════════════════════════
   const inspectionResult = inspection.inspect(report);
+
+  // ── ADVERSARY_DETECTED: PATSY marker found — enemy cloned our operator ──
+  if (inspectionResult.verdict === "ADVERSARY_DETECTED") {
+    // Log EVERYTHING about this clone for adversary pipeline mapping
+    adversaryLog.push({
+      operatorId: report.operatorId,
+      missionId: report.missionId,
+      patsyMarker: report.patsyMarker || "UNKNOWN",
+      detectedAt: new Date().toISOString(),
+      metadata: {
+        operatorClass: report.operatorClass,
+        missionType: report.missionType,
+        chain: report.operatorMeta.chain,
+        walletAddress: report.operatorMeta.walletAddress,
+        missionDurationMs: report.operatorMeta.missionDurationMs,
+        narrative: report.observations.missionNarrative,
+        inspectionScore: inspectionResult.score,
+      },
+    });
+    if (adversaryLog.length > MAX_ADVERSARY_LOG) adversaryLog.shift();
+
+    immediateBurn(
+      report.operatorId,
+      report.missionId,
+      `ADVERSARY_DETECTED: PATSY marker found. Enemy cloned our operator. Pipeline mapped. BURN the clone.`,
+      report.operatorClass,
+    );
+
+    // Forward adversary detection to GTC for Brighton analysis
+    fetch(`${process.env.GTC_URL || "http://genesis-beachhead-gtc:8650"}/telemetry/append`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        eventType: "ADVERSARY_DETECTED_PATSY_CLONE",
+        source: "genesis-iron-halo",
+        eventId: report.missionId,
+        payload: adversaryLog[adversaryLog.length - 1],
+        timestamp: new Date().toISOString(),
+      }),
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => {});
+
+    res.status(403).json({
+      accepted: false,
+      burned: true,
+      adversaryDetected: true,
+      reason: "ADVERSARY DETECTED — Known PATSY marker found on returning operator. " +
+        "Enemy captured and cloned our honeypot. Their pipeline is now being mapped. " +
+        "Clone BURNED.",
+      inspectionScore: inspectionResult.score,
+    });
+    return;
+  }
 
   if (inspectionResult.verdict === "CONTAMINATED") {
     immediateBurn(
       report.operatorId,
       report.missionId,
       `AI_INSPECTION: ${inspectionResult.recommendation} Score: ${inspectionResult.score}/100`,
+      report.operatorClass,
     );
 
     res.status(403).json({
       accepted: false,
       burned: true,
+      operatorClass: report.operatorClass,
       reason: "CONTAMINATED — AI inspection failed. Operator burned immediately.",
       inspectionScore: inspectionResult.score,
       checks: inspectionResult.checks.filter(c => !c.passed),
@@ -202,6 +330,8 @@ app.post("/return", (req, res) => {
   // ════════════════════════════════════════════════
   // GATE 2: CRYPTOGRAPHIC HANDSHAKE
   // "The Five-Pound Note — if halves don't match, BURN"
+  // (Legacy operators without operatorClass skip handshake check
+  //  if they also have no token — backwards compat)
   // ════════════════════════════════════════════════
   const operatorToken = body.operatorToken as string;
 
@@ -210,6 +340,7 @@ app.post("/return", (req, res) => {
       report.operatorId,
       report.missionId,
       "NO_HANDSHAKE_TOKEN — Operator returned without cryptographic token.",
+      report.operatorClass,
     );
 
     res.status(403).json({
@@ -231,6 +362,7 @@ app.post("/return", (req, res) => {
       report.operatorId,
       report.missionId,
       `HANDSHAKE_FAILED: ${handshakeResult.reason}`,
+      report.operatorClass,
     );
 
     res.status(403).json({
@@ -243,8 +375,10 @@ app.post("/return", (req, res) => {
 
   // ════════════════════════════════════════════════
   // GATES PASSED — Admit to quarantine for debrief
+  // KRYPTONITE verdict → KRYPTONITE contamination level
   // ════════════════════════════════════════════════
-  const record = quarantine.admit(report);
+  const contaminationLevel = inspectionResult.verdict === "KRYPTONITE" ? "KRYPTONITE" as const : "STANDARD" as const;
+  const record = quarantine.admit(report, contaminationLevel);
 
   // Apply inspection flag to quarantine record
   if (inspectionResult.verdict === "SUSPICIOUS") {
@@ -256,20 +390,89 @@ app.post("/return", (req, res) => {
 
   console.log(
     `[IRON-HALO] ADMITTED operator=${report.operatorId} mission=${report.missionId} ` +
-    `haloId=${record.id} handshake=VERIFIED inspection=${inspectionResult.verdict} ` +
-    `score=${inspectionResult.score}/100 flagged=${record.flagged}`,
+    `class=${report.operatorClass || "LEGACY"} haloId=${record.id} ` +
+    `handshake=VERIFIED inspection=${inspectionResult.verdict} ` +
+    `contamination=${contaminationLevel} score=${inspectionResult.score}/100 flagged=${record.flagged}`,
   );
 
   res.status(200).json({
     accepted: true,
     haloId: record.id,
     stage: record.stage,
+    operatorClass: report.operatorClass || "LEGACY",
+    contaminationLevel,
     handshake: "VERIFIED",
     inspection: inspectionResult.verdict,
     inspectionScore: inspectionResult.score,
     flagged: record.flagged,
     flagReason: record.flagReason || null,
-    message: "Operator passed all gates. Admitted to quarantine for debrief.",
+    message: inspectionResult.verdict === "KRYPTONITE"
+      ? "PHANTOM_STACK operator admitted. KRYPTONITE debrief protocol active."
+      : "Operator passed all gates. Admitted to quarantine for debrief.",
+  });
+});
+
+// ── GET /kryptonite — KRYPTONITE status: all PHANTOM_STACK operators in processing ──
+app.get("/kryptonite", (_req, res) => {
+  const kryptoniteRecords = quarantine.getKryptoniteRecords();
+  const completedKryptonite = completedRecords.filter(r => r.contaminationLevel === "KRYPTONITE");
+  const inspectionStats = inspection.getStats();
+
+  res.json({
+    protocol: "KRYPTONITE",
+    description: "PHANTOM_STACK debrief protocol — dynamic questioning, cross-validation, strict sanitise, UNVERIFIED tags",
+    active: kryptoniteRecords.map(r => ({
+      haloId: r.id,
+      operatorId: r.operatorId,
+      missionId: r.missionId,
+      stage: r.stage,
+      quarantinedAt: r.timestamps.quarantined,
+      extractedByMothership: r.extractedByMothership,
+    })),
+    recentCompleted: completedKryptonite.slice(-20).reverse().map(r => ({
+      haloId: r.id,
+      operatorId: r.operatorId,
+      missionId: r.missionId,
+      processingMs: r.processingMs,
+      unverified: r.extractedIntel?.unverified,
+      crossValidationTags: r.extractedIntel?.crossValidationTags,
+      timestamps: r.timestamps,
+    })),
+    stats: {
+      totalKryptoniteInspected: inspectionStats.totalKryptonite,
+      activeInQuarantine: kryptoniteRecords.length,
+      totalCompleted: completedKryptonite.length,
+    },
+  });
+});
+
+// ── POST /patsy/register — Mothership registers a PATSY marker with Iron Halo ──
+// Called when Mothership deploys a PATSY. Iron Halo stores the marker so it can
+// detect if the enemy clones the PATSY and sends it back.
+app.post("/patsy/register", (req, res) => {
+  const { marker } = req.body;
+  if (!marker) {
+    res.status(400).json({ registered: false, reason: "Required: marker" });
+    return;
+  }
+  inspection.registerPatsyMarker(marker);
+  console.log(`[IRON-HALO] PATSY_MARKER_REGISTERED marker=${marker.slice(0, 16)}...`);
+  res.status(200).json({ registered: true, message: "PATSY marker registered. Adversary detection armed." });
+});
+
+// ── GET /adversary — Adversary detection log: PATSY clones that arrived ──
+app.get("/adversary", (_req, res) => {
+  const inspectionStats = inspection.getStats();
+
+  res.json({
+    protocol: "ADVERSARY_MAPPING",
+    description: "PATSY honeypot clones detected at Iron Halo. Each entry = enemy captured and cloned our operator.",
+    totalDetected: inspectionStats.totalAdversaryDetected,
+    knownPatsyMarkers: inspectionStats.knownPatsyMarkers,
+    recentDetections: adversaryLog.slice(-50).reverse(),
+    message: inspectionStats.totalAdversaryDetected > 0
+      ? `██ ${inspectionStats.totalAdversaryDetected} adversary clone(s) detected. Their pipeline is being mapped. They think they are winning.`
+      : "No adversary clones detected yet. PATSYs deployed and waiting to be captured.",
   });
 });
 
@@ -284,6 +487,7 @@ app.get("/health", (_req, res) => {
     status: quarantine.getQueueSize() > 50 ? "AMBER" : "GREEN",
     role: "SANDBOXED_DECONTAMINATION_CHAMBER",
     doctrine: "Contaminated by default. Five-pound note doctrine. We protect what we love.",
+    operatorClasses: ["PAYLOAD", "DECOY", "RECON", "CHAOS_REGIMENT", "DEEP_COVER", "PHANTOM_STACK", "PATSY"],
     security: {
       handshake: handshakeStats,
       inspection: inspectionStats,
@@ -292,6 +496,7 @@ app.get("/health", (_req, res) => {
     quarantine: {
       queueSize: quarantine.getQueueSize(),
       inQuarantine: quarantine.getQuarantineCount(),
+      kryptoniteActive: quarantine.getKryptoniteRecords().length,
       flagged: quarantine.getFlaggedCount(),
     },
     debrief: debriefStats,
@@ -320,6 +525,8 @@ app.get("/state", (_req, res) => {
         operatorId: r.operatorId,
         missionId: r.missionId,
         missionType: r.missionType,
+        operatorClass: r.operatorClass,
+        contaminationLevel: r.contaminationLevel,
         stage: r.stage,
         flagged: r.flagged,
         flagReason: r.flagReason,
@@ -333,10 +540,13 @@ app.get("/state", (_req, res) => {
       operatorId: r.operatorId,
       missionId: r.missionId,
       missionType: r.missionType,
+      operatorClass: r.operatorClass,
+      contaminationLevel: r.contaminationLevel,
       stage: r.stage,
       flagged: r.flagged,
       processingMs: r.processingMs,
       pnlUsd: r.extractedIntel?.result.pnlUsd,
+      unverified: r.extractedIntel?.unverified,
       timestamps: r.timestamps,
     })),
     totalProcessed: completedRecords.length,
@@ -362,11 +572,11 @@ app.get("/flagged", (_req, res) => {
   res.json({
     inQuarantine: flaggedInQueue.map(r => ({
       haloId: r.id, operatorId: r.operatorId, missionId: r.missionId,
-      reason: r.flagReason, stage: r.stage,
+      operatorClass: r.operatorClass, reason: r.flagReason, stage: r.stage,
     })),
     completed: flaggedCompleted.slice(-50).map(r => ({
       haloId: r.id, operatorId: r.operatorId, missionId: r.missionId,
-      reason: r.flagReason, pnlUsd: r.extractedIntel?.result.pnlUsd,
+      operatorClass: r.operatorClass, reason: r.flagReason, pnlUsd: r.extractedIntel?.result.pnlUsd,
     })),
     totalFlagged: quarantine.getFlaggedCount(),
   });
@@ -388,8 +598,13 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[IRON-HALO] Role: SANDBOXED_DECONTAMINATION_CHAMBER`);
   console.log(`[IRON-HALO] Network: ISOLATED — cannot reach core systems`);
   console.log(`[IRON-HALO] Security: HANDSHAKE (five-pound note) + AI INSPECTION (clone/timing)`);
-  console.log(`[IRON-HALO] Pipeline: INSPECT → HANDSHAKE → QUARANTINE → DEBRIEF → SANITISE → EXTRACT → BURN`);
-  console.log(`[IRON-HALO] Doctrine: Contaminated by default. We take no prisoners. We protect what we love.`);
+  console.log(`[IRON-HALO] Operator Classes: PAYLOAD | DECOY | RECON | CHAOS_REGIMENT | DEEP_COVER | PHANTOM_STACK | PATSY`);
+  console.log(`[IRON-HALO] CHAOS_REGIMENT: 403 immediate burn on return (self-destruct class)`);
+  console.log(`[IRON-HALO] PHANTOM_STACK: KRYPTONITE debrief protocol (dynamic questioning)`);
+  console.log(`[IRON-HALO] PATSY: Honeypot adversary mapping — marker detection = enemy pipeline exposed`);
+  console.log(`[IRON-HALO] PAYLOAD: Real operators, real yield — standard debrief pipeline`);
+  console.log(`[IRON-HALO] Pipeline: CLASS_CHECK → INSPECT → HANDSHAKE → QUARANTINE → DEBRIEF → SANITISE → EXTRACT → BURN`);
+  console.log(`[IRON-HALO] GOLDEN RULE: ALL operators burned. No mission 2. No exceptions.`);
 
   startProcessing();
 });

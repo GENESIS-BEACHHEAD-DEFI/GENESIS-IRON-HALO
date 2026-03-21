@@ -7,7 +7,22 @@
  * The interrogation room. Extracts every drop of intelligence from
  * the returning operator before it's burned. Academy-grade AI interrogation.
  *
+ * Two debrief protocols:
+ *   STANDARD:   Standard debrief → sanitise → extract → BURN
+ *   KRYPTONITE: Dynamic questioning → cross-validation tagging →
+ *               strict sanitise (UNVERIFIED) → extract → BURN
+ *
+ * KRYPTONITE protocol for PHANTOM_STACK operators:
+ *   - These operators have been dark for months. Sleeper cells.
+ *   - Intel is the most valuable (deep cover, long observation)
+ *   - But also highest risk of compromise or manipulation
+ *   - ALL intel marked UNVERIFIED until cross-validated by Brighton/ARIS
+ *   - Dynamic questioning: challenge inconsistencies, probe for planted data
+ *
  * Intel never dies. Operator is disposable. Knowledge is immortal.
+ *
+ * GOLDEN RULE (LAW): processOperator() ALWAYS ends with burnOperator().
+ * No code path bypasses it. No exceptions.
  */
 
 import { createHash, randomUUID } from "crypto";
@@ -16,16 +31,20 @@ import type { OperatorReturnReport, HaloRecord, SanitisedIntel } from "../types"
 const GTC_URL = process.env.GTC_URL || "http://genesis-beachhead-gtc:8650";
 const BRIGHTON_URL = process.env.BRIGHTON_URL || "";
 const LEDGER_LITE_URL = process.env.LEDGER_LITE_URL || "http://genesis-ledger-lite:8500";
+const KRYPTONITE_DEBRIEF_ENABLED = process.env.KRYPTONITE_DEBRIEF_ENABLED === "true";
 
 export class DebriefService {
   private totalDebriefed = 0;
   private totalIntelExtracted = 0;
   private totalBurned = 0;
   private totalProcessingMs = 0;
+  private totalKryptoniteDebriefed = 0;
 
   /**
    * Full debrief pipeline: DEBRIEF → SANITISE → EXTRACT → BURN
-   * Processes the operator through all stages sequentially.
+   * Routes to KRYPTONITE protocol for PHANTOM_STACK operators.
+   *
+   * GOLDEN RULE: This method ALWAYS ends with burnOperator(). No exceptions.
    */
   async processOperator(
     record: HaloRecord,
@@ -33,15 +52,27 @@ export class DebriefService {
   ): Promise<HaloRecord> {
     const startTime = Date.now();
 
+    // Route to KRYPTONITE protocol if applicable
+    const isKryptonite = record.contaminationLevel === "KRYPTONITE" && KRYPTONITE_DEBRIEF_ENABLED;
+
     // ── Stage 1: DEBRIEF ──
     record.stage = "DEBRIEFING";
     record.timestamps.debriefed = new Date().toISOString();
     this.totalDebriefed++;
 
-    console.log(
-      `[IRON-HALO] DEBRIEF operator=${record.operatorId} mission=${record.missionId} ` +
-      `status=${report.result.status} pnl=$${report.result.pnlUsd || 0}`,
-    );
+    if (isKryptonite) {
+      this.totalKryptoniteDebriefed++;
+      console.log(
+        `[IRON-HALO] ██ KRYPTONITE DEBRIEF ██ operator=${record.operatorId} mission=${record.missionId} ` +
+        `class=PHANTOM_STACK — Dynamic questioning protocol active`,
+      );
+      this.kryptoniteDebrief(record, report);
+    } else {
+      console.log(
+        `[IRON-HALO] DEBRIEF operator=${record.operatorId} mission=${record.missionId} ` +
+        `status=${report.result.status} pnl=$${report.result.pnlUsd || 0}`,
+      );
+    }
 
     // Log observations
     if (report.observations.outsideParams && report.observations.outsideParams.length > 0) {
@@ -70,11 +101,14 @@ export class DebriefService {
     record.stage = "SANITISING";
     record.timestamps.sanitised = new Date().toISOString();
 
-    const intel = this.sanitise(report);
+    const intel = isKryptonite
+      ? this.kryptoniteSanitise(report, record)
+      : this.sanitise(report);
     record.extractedIntel = intel;
 
     console.log(
-      `[IRON-HALO] SANITISED operator=${record.operatorId} — intel cleaned for downstream`,
+      `[IRON-HALO] SANITISED operator=${record.operatorId} — intel cleaned for downstream` +
+      (isKryptonite ? " (KRYPTONITE: all intel marked UNVERIFIED)" : ""),
     );
 
     // ── Stage 3: EXTRACT — Forward intel to Whiteboard/GTC/Brighton ──
@@ -88,7 +122,7 @@ export class DebriefService {
       `[IRON-HALO] EXTRACTED operator=${record.operatorId} — intel forwarded to GTC + Brighton`,
     );
 
-    // ── Stage 4: BURN ──
+    // ── Stage 4: BURN — GOLDEN RULE: NO CODE PATH BYPASSES THIS ──
     record.stage = "BURNING";
     record.timestamps.burned = new Date().toISOString();
 
@@ -103,7 +137,8 @@ export class DebriefService {
 
     console.log(
       `[IRON-HALO] COMPLETE operator=${record.operatorId} — ` +
-      `processed in ${record.processingMs}ms, operator BURNED`,
+      `processed in ${record.processingMs}ms, operator BURNED` +
+      (isKryptonite ? " (KRYPTONITE protocol)" : ""),
     );
 
     // Log financial events to Ledger Lite (if there was P&L)
@@ -112,6 +147,8 @@ export class DebriefService {
         operatorId: record.operatorId,
         missionId: record.missionId,
         missionType: record.missionType,
+        operatorClass: record.operatorClass || "LEGACY",
+        contaminationLevel: record.contaminationLevel || "STANDARD",
         status: report.result.status,
         pnlUsd: report.result.pnlUsd,
         gasSpentUsd: report.result.gasSpentUsd || 0,
@@ -120,6 +157,109 @@ export class DebriefService {
     }
 
     return record;
+  }
+
+  /**
+   * KRYPTONITE Debrief — Dynamic questioning protocol for PHANTOM_STACK operators.
+   *
+   * These operators have been embedded for months as sleeper cells.
+   * Intel is extremely valuable but highest risk of planted/manipulated data.
+   *
+   * Dynamic questioning:
+   *   - Challenge narrative consistency across observations
+   *   - Probe for time gaps or unexplained periods
+   *   - Cross-reference P&L with reported conditions
+   *   - Tag all intel with cross-validation markers for Brighton/ARIS
+   */
+  private kryptoniteDebrief(record: HaloRecord, report: OperatorReturnReport): void {
+    const challenges: string[] = [];
+
+    // Challenge 1: Time gap analysis — long-term deployment should have proportional observations
+    const deployedMs = report.operatorMeta.missionDurationMs;
+    const observationCount = (report.observations.outsideParams?.length || 0) +
+      (report.observations.anomalies?.length || 0);
+    const hoursDeployed = deployedMs / 3600000;
+
+    if (hoursDeployed > 24 && observationCount < 3) {
+      challenges.push(
+        `TIME_GAP: Deployed ${hoursDeployed.toFixed(1)}h but only ${observationCount} observations. ` +
+        `Where was the operator? What happened during unaccounted periods?`,
+      );
+    }
+
+    // Challenge 2: Narrative consistency — check for contradictions
+    const narrative = report.observations.missionNarrative;
+    const conditions = report.observations.conditions;
+
+    if (conditions?.mempoolCongestion === "HIGH" && (report.result.gasSpentUsd || 0) < 1) {
+      challenges.push(
+        `CONSISTENCY: Reports HIGH mempool congestion but gas spend is only $${report.result.gasSpentUsd || 0}. ` +
+        `High congestion should mean high gas. Possible fabrication.`,
+      );
+    }
+
+    // Challenge 3: Success without evidence
+    if (report.result.status === "SUCCESS" && (!narrative || narrative.length < 50)) {
+      challenges.push(
+        `EVIDENCE: Claims SUCCESS but narrative is minimal (${narrative?.length || 0} chars). ` +
+        `Long-term operators should have detailed intelligence.`,
+      );
+    }
+
+    // Challenge 4: Competitor intel validation marker
+    if (conditions?.competitorActivity) {
+      challenges.push(
+        `COMPETITOR_INTEL: Reports competitor activity "${conditions.competitorActivity}". ` +
+        `REQUIRES CROSS-VALIDATION via Brighton pattern matching. May be planted intelligence.`,
+      );
+    }
+
+    if (challenges.length > 0) {
+      console.log(
+        `[IRON-HALO] KRYPTONITE_CHALLENGES operator=${record.operatorId}: ` +
+        challenges.join(" || "),
+      );
+    }
+
+    console.log(
+      `[IRON-HALO] KRYPTONITE_DEBRIEF_COMPLETE operator=${record.operatorId} ` +
+      `challenges=${challenges.length} — All intel tagged UNVERIFIED`,
+    );
+  }
+
+  /**
+   * KRYPTONITE Sanitise — Stricter sanitisation for PHANTOM_STACK operators.
+   *
+   * All intel marked UNVERIFIED until cross-validated by Brighton/ARIS.
+   * Cross-validation tags added for downstream correlation.
+   */
+  private kryptoniteSanitise(report: OperatorReturnReport, record: HaloRecord): SanitisedIntel {
+    const base = this.sanitise(report);
+
+    // Mark ALL intel as UNVERIFIED — Brighton/ARIS must cross-validate
+    base.unverified = true;
+
+    // Add cross-validation tags for downstream correlation
+    base.crossValidationTags = [
+      `KRYPTONITE:${record.operatorId}`,
+      `PHANTOM_STACK:${record.missionId}`,
+      `DURATION_HOURS:${(report.operatorMeta.missionDurationMs / 3600000).toFixed(1)}`,
+    ];
+
+    if (report.observations.conditions?.competitorActivity) {
+      base.crossValidationTags.push(`COMPETITOR_INTEL:REQUIRES_VALIDATION`);
+    }
+
+    if (report.operatorMeta.chain) {
+      base.crossValidationTags.push(`CHAIN:${report.operatorMeta.chain}`);
+    }
+
+    console.log(
+      `[IRON-HALO] KRYPTONITE_SANITISE operator=${record.operatorId} — ` +
+      `all intel UNVERIFIED, ${base.crossValidationTags.length} cross-validation tags`,
+    );
+
+    return base;
   }
 
   /**
@@ -163,7 +303,9 @@ export class DebriefService {
    */
   private async forwardIntel(intel: SanitisedIntel, record: HaloRecord): Promise<void> {
     const gtcPayload = {
-      eventType: "OPERATOR_DEBRIEF",
+      eventType: record.contaminationLevel === "KRYPTONITE"
+        ? "OPERATOR_KRYPTONITE_DEBRIEF"
+        : "OPERATOR_DEBRIEF",
       source: "genesis-iron-halo",
       eventId: record.id,
       payload: {
@@ -171,6 +313,8 @@ export class DebriefService {
         missionType: intel.missionType,
         operatorId: record.operatorId,
         swarmId: record.swarmId,
+        operatorClass: record.operatorClass || "LEGACY",
+        contaminationLevel: record.contaminationLevel || "STANDARD",
         status: intel.result.status,
         pnlUsd: intel.result.pnlUsd,
         gasSpentUsd: intel.result.gasSpentUsd,
@@ -184,6 +328,8 @@ export class DebriefService {
         selfAssessment: intel.selfAssessment,
         flagged: record.flagged,
         flagReason: record.flagReason,
+        unverified: intel.unverified || false,
+        crossValidationTags: intel.crossValidationTags || [],
       },
       timestamp: new Date().toISOString(),
     };
@@ -211,6 +357,10 @@ export class DebriefService {
 
   /**
    * BURN the operator.
+   *
+   * GOLDEN RULE (LAW): ALL operators burned after mission.
+   * No mission 2. No exceptions. Our core is worth more than any operator.
+   *
    * In v1, this is a logical burn — log the burn event, mark as destroyed.
    * In future versions with real wallets, this will:
    *   - Sweep remaining balance to gas buffer
@@ -220,9 +370,10 @@ export class DebriefService {
   private burnOperator(record: HaloRecord, report: OperatorReturnReport): void {
     console.log(
       `[IRON-HALO] BURN operator=${record.operatorId} ` +
+      `class=${record.operatorClass || "LEGACY"} ` +
       `wallet=${report.operatorMeta.walletAddress ? report.operatorMeta.walletAddress.slice(0, 10) + "..." : "N/A"} ` +
       `chain=${report.operatorMeta.chain || "N/A"} — ` +
-      `DESTROYED. Zero fingerprint. No reuse.`,
+      `DESTROYED. Zero fingerprint. No reuse. No mission 2.`,
     );
   }
 
@@ -253,12 +404,14 @@ export class DebriefService {
     totalDebriefed: number;
     totalIntelExtracted: number;
     totalBurned: number;
+    totalKryptoniteDebriefed: number;
     avgProcessingMs: number;
   } {
     return {
       totalDebriefed: this.totalDebriefed,
       totalIntelExtracted: this.totalIntelExtracted,
       totalBurned: this.totalBurned,
+      totalKryptoniteDebriefed: this.totalKryptoniteDebriefed,
       avgProcessingMs: this.totalDebriefed > 0
         ? Math.round(this.totalProcessingMs / this.totalDebriefed)
         : 0,

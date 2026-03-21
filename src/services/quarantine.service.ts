@@ -6,10 +6,15 @@
  *
  * Quarantine validates the return report, flags suspicious operators,
  * and queues for debriefing.
+ *
+ * Operator class tracking:
+ *   - Records operatorClass and contaminationLevel on admission
+ *   - KRYPTONITE operators get PRIORITY processing (they've been dark longest,
+ *     intel decays fastest, but also highest risk of compromise)
  */
 
 import { randomUUID } from "crypto";
-import type { OperatorReturnReport, HaloRecord } from "../types";
+import type { OperatorReturnReport, HaloRecord, OperatorClass, ContaminationLevel } from "../types";
 
 /** Maximum time an operator can sit in quarantine before auto-flag (1 hour) */
 const QUARANTINE_TIMEOUT_MS = parseInt(process.env.QUARANTINE_TIMEOUT_MS || "3600000", 10);
@@ -22,7 +27,10 @@ export class QuarantineService {
    * Admit an operator into quarantine.
    * Returns the HaloRecord ID for tracking through the pipeline.
    */
-  admit(report: OperatorReturnReport): HaloRecord {
+  admit(
+    report: OperatorReturnReport,
+    contaminationLevel?: ContaminationLevel,
+  ): HaloRecord {
     const id = randomUUID();
     const now = new Date().toISOString();
 
@@ -32,6 +40,9 @@ export class QuarantineService {
       missionId: report.missionId,
       missionType: report.missionType,
       swarmId: report.swarmId,
+      operatorClass: report.operatorClass,
+      contaminationLevel: contaminationLevel || "STANDARD",
+      extractedByMothership: report.extractedByMothership,
       stage: "QUARANTINE",
       timestamps: {
         quarantined: now,
@@ -80,28 +91,43 @@ export class QuarantineService {
 
     console.log(
       `[IRON-HALO] QUARANTINE operator=${report.operatorId} mission=${report.missionId} ` +
-      `type=${report.missionType} flagged=${record.flagged}`,
+      `type=${report.missionType} class=${record.operatorClass || "LEGACY"} ` +
+      `contamination=${record.contaminationLevel} flagged=${record.flagged}`,
     );
 
     return record;
   }
 
   /**
-   * Get next operator ready for debriefing (FIFO, non-flagged first).
+   * Get next operator ready for debriefing.
+   *
+   * Priority order:
+   *   1. KRYPTONITE operators (priority — intel decays fastest, highest risk)
+   *   2. Non-flagged STANDARD operators (likely clean)
+   *   3. Flagged STANDARD operators
    */
   getNextForDebrief(): HaloRecord | null {
-    // Process non-flagged operators first — they're likely clean
+    // Priority 1: KRYPTONITE operators — process first
     for (const [, record] of this.quarantineQueue) {
-      if (record.stage === "QUARANTINE" && !record.flagged) {
+      if (record.stage === "QUARANTINE" && record.contaminationLevel === "KRYPTONITE") {
         return record;
       }
     }
-    // Then flagged operators
+
+    // Priority 2: Non-flagged standard operators — they're likely clean
+    for (const [, record] of this.quarantineQueue) {
+      if (record.stage === "QUARANTINE" && !record.flagged && record.contaminationLevel !== "KRYPTONITE") {
+        return record;
+      }
+    }
+
+    // Priority 3: Flagged standard operators
     for (const [, record] of this.quarantineQueue) {
       if (record.stage === "QUARANTINE" && record.flagged) {
         return record;
       }
     }
+
     return null;
   }
 
@@ -131,6 +157,14 @@ export class QuarantineService {
    */
   getAll(): HaloRecord[] {
     return Array.from(this.quarantineQueue.values());
+  }
+
+  /**
+   * Get all KRYPTONITE records currently in quarantine.
+   */
+  getKryptoniteRecords(): HaloRecord[] {
+    return Array.from(this.quarantineQueue.values())
+      .filter(r => r.contaminationLevel === "KRYPTONITE");
   }
 
   getQueueSize(): number {
