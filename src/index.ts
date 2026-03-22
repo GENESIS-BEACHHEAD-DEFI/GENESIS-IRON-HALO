@@ -57,6 +57,7 @@ import { DropZoneService } from "./services/advisory/dropzone.service";
 import { FirewallService } from "./services/advisory/firewall.service";
 import { CircuitBreakerService } from "./services/advisory/circuit-breaker.service";
 import { SchemaGeneratorService } from "./services/advisory/schema-generator.service";
+import { DeadMansSwitchService } from "./services/dead-mans-switch.service";
 import { ParcelRendererService } from "./services/advisory/parcel-renderer.service";
 import { DecisionMatrixService } from "./services/advisory/decision-matrix.service";
 import { SimulationAnalystAdapter } from "./services/advisory/analyst-simulation.adapter";
@@ -85,6 +86,8 @@ const circuitBreakerService = new CircuitBreakerService();
 const schemaGeneratorService = new SchemaGeneratorService();
 const parcelRendererService = new ParcelRendererService();
 const decisionMatrixService = new DecisionMatrixService();
+
+const deadMansSwitch = new DeadMansSwitchService();
 
 const blackboard = ADVISORY_ENABLED
   ? new BlackboardService(
@@ -546,6 +549,7 @@ app.get("/health", (_req, res) => {
     service: "genesis-iron-halo",
     version: "1.2",
     status: quarantine.getQueueSize() > 50 ? "AMBER" : "GREEN",
+    lockdown: deadMansSwitch.getStatus().status,
     role: "SANDBOXED_DECONTAMINATION_CHAMBER",
     doctrine: "Contaminated by default. Five-pound note doctrine. We protect what we love.",
     operatorClasses: ["PAYLOAD", "DECOY", "RECON", "CHAOS_REGIMENT", "DEEP_COVER", "PHANTOM_STACK", "PATSY"],
@@ -735,6 +739,33 @@ app.get("/advisory/firewall", (req, res) => {
 });
 
 // ════════════════════════════════════════════════
+// DEAD MAN'S SWITCH — Advisory AI probe detection
+// "If they're curious about the vault, burn everything."
+// ════════════════════════════════════════════════
+
+// ── GET /lockdown/status — Dead Man's Switch status ──
+app.get("/lockdown/status", (_req, res) => {
+  res.json(deadMansSwitch.getStatus());
+});
+
+// ── POST /lockdown/reset — Commander manual restart ──
+app.post("/lockdown/reset", (_req, res) => {
+  const result = deadMansSwitch.reset();
+  res.json(result);
+});
+
+// ── POST /lockdown/scan — Test scan text for probes ──
+app.post("/lockdown/scan", (req, res) => {
+  const { text, advisorId } = req.body || {};
+  if (!text) {
+    res.status(400).json({ error: "text required" });
+    return;
+  }
+  const result = deadMansSwitch.scan(text, advisorId || "manual_test");
+  res.json(result);
+});
+
+// ════════════════════════════════════════════════
 // RED TEAM INTEGRATION — Receives decontaminated attack reports
 // from Red Aggressor Force via Blackboard protocol.
 // Treated as KRYPTONITE — logged to GTC, danger alerts forwarded.
@@ -831,6 +862,8 @@ app.listen(PORT, "0.0.0.0", () => {
     console.log(`[IRON-HALO] Advisory: DISABLED (set ADVISORY_ENABLED=true to activate Blackboard Architecture)`);
     console.log(`[IRON-HALO] Pipeline: CLASS_CHECK → INSPECT → HANDSHAKE → QUARANTINE → DEBRIEF → SANITISE → EXTRACT → BURN`);
   }
+  console.log(`[IRON-HALO] DEAD_MANS_SWITCH: Active — threshold=${process.env.DEAD_MANS_SWITCH_THRESHOLD || "3"} probes = LOCKDOWN`);
+  console.log(`[IRON-HALO] "If they're curious about the vault, burn everything."`);
   console.log(`[IRON-HALO] GOLDEN RULE: ALL operators burned. No mission 2. No exceptions.`);
 
   startProcessing();
