@@ -30,6 +30,7 @@ import type { OperatorReturnReport, HaloRecord, SanitisedIntel } from "../types"
 
 const GTC_URL = process.env.GTC_URL || "http://genesis-beachhead-gtc:8650";
 const BRIGHTON_URL = process.env.BRIGHTON_URL || "";
+const WHITEBOARD_URL = process.env.WHITEBOARD_URL || "";
 const LEDGER_LITE_URL = process.env.LEDGER_LITE_URL || "http://genesis-ledger-lite:8500";
 const KRYPTONITE_DEBRIEF_ENABLED = process.env.KRYPTONITE_DEBRIEF_ENABLED === "true";
 
@@ -381,6 +382,36 @@ export class DebriefService {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(gtcPayload),
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => {});
+    }
+
+    // Forward to Whiteboard (institutional intelligence)
+    if (WHITEBOARD_URL) {
+      const whiteboardPayload = {
+        category: record.flagged ? "WARNING" : "LESSON",
+        source: "IRON_HALO",
+        intelligence: `${intel.missionType} mission ${intel.result.status}: ` +
+          `pnl=$${intel.result.pnlUsd || 0} chain=${intel.metrics.chain || "unknown"} ` +
+          `exchanges=${intel.metrics.exchangesUsed.join(",")} ` +
+          `latency=${intel.metrics.exchangeLatencyMs || 0}ms` +
+          (intel.observations.anomalies.length > 0 ? ` anomalies=${intel.observations.anomalies.join(";")}` : "") +
+          (intel.selfAssessment?.suggestion ? ` self-assessment="${intel.selfAssessment.suggestion}"` : ""),
+        affectedRails: ["ALL"] as string[],
+        affectedClasses: [] as string[],
+        evidence: [record.id],
+        tags: [
+          intel.missionType,
+          intel.result.status,
+          ...(intel.metrics.chain ? [intel.metrics.chain] : []),
+          ...(record.operatorClass ? [record.operatorClass] : []),
+        ],
+      };
+
+      fetch(`${WHITEBOARD_URL}/intel/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(whiteboardPayload),
         signal: AbortSignal.timeout(5000),
       }).catch(() => {});
     }
