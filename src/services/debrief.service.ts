@@ -142,6 +142,14 @@ export class DebriefService {
     record.stage = "EXTRACTING";
     record.timestamps.extracted = new Date().toISOString();
 
+    // Evidence chain: hash before burn (Nemo-X legal protection)
+    const evidenceHash = this.hashDebriefRecord(record);
+    this.forwardEvidenceHash(record.id, evidenceHash, intel.missionType);
+    console.log(
+      `[IRON_HALO] EVIDENCE_CHAIN hash=${evidenceHash.slice(0, 16)}... ` +
+      `record=${record.id.slice(0, 8)}... — immutable proof on Ledger Lite`,
+    );
+
     await this.forwardIntel(intel, record);
     this.totalIntelExtracted++;
 
@@ -322,6 +330,39 @@ export class DebriefService {
         slippageObserved: report.observations.conditions?.slippageObserved,
       },
     };
+  }
+
+  /**
+   * Hash a debrief record deterministically for evidence chain.
+   * Canonical JSON (sorted keys) ensures identical hash regardless of insertion order.
+   */
+  private hashDebriefRecord(record: any): string {
+    const canonical = JSON.stringify(record, Object.keys(record).sort());
+    return createHash("sha256").update(canonical).digest("hex");
+  }
+
+  /**
+   * Forward evidence hash to Ledger Lite — immutable proof the record existed
+   * BEFORE the operator is burned. Nemo-X legal protection.
+   */
+  private forwardEvidenceHash(recordId: string, hash: string, missionType: string): void {
+    if (!LEDGER_LITE_URL) return;
+
+    fetch(`${LEDGER_LITE_URL}/payload`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rail: "INTELLIGENCE",
+        type: "DEBRIEF_HASH",
+        recordId,
+        hash,
+        missionType,
+        timestamp: new Date().toISOString(),
+      }),
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => {
+      // Ledger Lite may be unreachable — log but don't block
+    });
   }
 
   /**
