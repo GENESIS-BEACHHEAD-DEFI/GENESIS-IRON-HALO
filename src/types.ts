@@ -1,5 +1,5 @@
 /**
- * GENESIS-IRON-HALO v1.2 — Type Definitions
+ * GENESIS-IRON-HALO v1.3 — Type Definitions
  *
  * Every returning operator is contaminated by default.
  * Iron Halo is the sandboxed decontamination chamber.
@@ -12,6 +12,14 @@
  * contamination, compromise, and operational drift. They NEVER
  * speak to each other. They leave Advisory Parcels in sandboxed
  * drop zones. Iron Halo retrieves and judges.
+ *
+ * v1.3: MUTUAL CRYPTOGRAPHIC HANDSHAKE + SEALED MISSION MANIFEST
+ *   1. Mutual Handshake — both operator AND Iron Halo prove identity.
+ *      Prevents adversary mirror attacks (fake endpoint stealing alpha).
+ *      Centurion Index signs identity proofs for both parties.
+ *   2. Sealed Mission Manifest — DARPA seals expected yield parameters
+ *      at dispatch. Operator returns execution receipt. Reconciliation
+ *      engine compares within tolerance. No skimming. No side-drops.
  *
  * GOLDEN RULE (LAW): ALL operators burned after mission.
  * No mission 2. No exceptions. Our core is worth more than any operator.
@@ -444,4 +452,240 @@ export interface BlackboardState {
   activeDropZones: number;
   avgAdvisoryMs: number;
   lastRunAt: string | null;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// v1.3: MUTUAL CRYPTOGRAPHIC HANDSHAKE
+//
+// Threat: Advanced adversary mirrors our endpoint, convinces operator
+// it's talking to Genesis. Operator delivers alpha to the enemy.
+//
+// Solution: Centurion Index signs both parties' identity proofs.
+// Operator verifies Iron Halo BEFORE transmitting payload.
+// Iron Halo verifies operator (existing Five-Pound Note).
+// MUTUAL authentication — both sides prove who they are.
+// ════════════════════════════════════════════════════════════════════
+
+/** Mutual handshake token — extends existing HandshakeToken with Centurion proof */
+export interface MutualHandshakeIssuance {
+  operatorId: string;
+  missionId: string;
+  /** Existing Five-Pound Note operator token */
+  operatorToken: string;
+  /** Centurion-signed identity proof for Iron Halo endpoint */
+  haloIdentityProof: string;
+  /** Centurion-signed identity proof for operator */
+  operatorIdentityProof: string;
+  /** Centurion signature over the full mission binding (tamper detection) */
+  centurionSeal: string;
+  issuedAt: string;
+  expiresAt: string;
+}
+
+/** Mutual verification request — operator challenges Iron Halo */
+export interface MutualVerifyRequest {
+  operatorId: string;
+  missionId: string;
+  /** Random nonce from operator — Iron Halo must sign this */
+  challengeNonce: string;
+  /** The haloIdentityProof operator received at dispatch — must match */
+  expectedHaloProof: string;
+}
+
+/** Mutual verification response — Iron Halo proves identity */
+export interface MutualVerifyResponse {
+  verified: boolean;
+  /** Iron Halo signs the nonce with Centurion-derived key — proves it holds the secret */
+  haloNonceSignature: string;
+  /** Counter-challenge: operator must respond on /return to prove it's genuine */
+  operatorChallenge: string;
+  reason: string;
+  timestamp: string;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// v1.3: SEALED MISSION MANIFEST + YIELD RECONCILIATION
+//
+// Threat: Operator skims yield or side-drops during execution.
+// "What they earnt needs to tally with what was present at the start."
+//
+// Solution: DARPA seals expected parameters at dispatch. Operator
+// returns execution receipt. Reconciliation engine compares.
+// Three checks: yield variance, manifest integrity, parameter match.
+// ════════════════════════════════════════════════════════════════════
+
+/** Sealed Mission Manifest — DARPA seals expected parameters at dispatch */
+export interface SealedMissionManifest {
+  manifestId: string;
+  operatorId: string;
+  missionId: string;
+  /** Expected execution parameters — sealed by DARPA */
+  expected: {
+    buyExchange?: string;
+    sellExchange?: string;
+    pair?: string;
+    expectedBuyPrice?: number;
+    expectedSellPrice?: number;
+    expectedYieldUsd?: number;
+    clipSizeUsd?: number;
+    maxSlippageBps?: number;
+    networkFeeUsd?: number;
+  };
+  /** Tolerance for yield variance in basis points (default 50bps) */
+  toleranceBps: number;
+  sealedAt: string;
+  /** SHA-256 hash of the canonical manifest — tamper detection */
+  sealHash: string;
+}
+
+/** Execution Receipt — what the operator actually did */
+export interface ExecutionReceipt {
+  manifestId: string;
+  operatorId: string;
+  missionId: string;
+  /** Actual execution results */
+  actual: {
+    buyExchange?: string;
+    sellExchange?: string;
+    pair?: string;
+    actualBuyPrice?: number;
+    actualSellPrice?: number;
+    actualYieldUsd?: number;
+    clipSizeUsd?: number;
+    actualSlippageBps?: number;
+    networkFeeUsd?: number;
+    /** Transaction hashes — proof of execution on-chain */
+    txHashes?: string[];
+  };
+}
+
+/** Reconciliation check types */
+export type ReconciliationCheckType =
+  | "YIELD_VARIANCE"           // |actual - expected| / expected
+  | "MANIFEST_INTEGRITY"       // sealHash tamper check
+  | "PARAMETER_MATCH"          // Exchange/pair consistency
+  | "TX_VERIFICATION"          // Transaction hash presence
+  | "CLIP_SIZE_VARIANCE";      // Clip size deviation check
+
+/** Individual reconciliation check */
+export interface ReconciliationCheck {
+  type: ReconciliationCheckType;
+  passed: boolean;
+  detail: string;
+  varianceBps?: number;
+}
+
+/** Reconciliation verdict */
+export type ReconciliationVerdict =
+  | "RECONCILED"               // All checks pass within tolerance
+  | "VARIANCE_DETECTED"        // Minor discrepancy, flagged but acceptable
+  | "SUSPICIOUS"               // Variance exceeds tolerance — flag for review
+  | "TAMPERED";                // Manifest integrity compromised — IMMEDIATE BURN
+
+/** Full reconciliation result */
+export interface ReconciliationResult {
+  manifestId: string;
+  operatorId: string;
+  missionId: string;
+  verdict: ReconciliationVerdict;
+  checks: ReconciliationCheck[];
+  yieldVarianceBps: number;
+  reconciled: boolean;
+  timestamp: string;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// v1.3.1: STRIKE PROTOCOL — DEFENSIVE SELF-DESTRUCT DOCTRINE
+//
+// "We destroy what is ours. We defend what we love."
+//
+// When an adversary captures an operator and attempts to use it with
+// incorrect credentials, the Strike Protocol activates:
+//
+//   STRIKE ONE:  Operator goes dark. Reports attempt via dead-drop.
+//                Adversary doesn't know they've been detected.
+//   STRIKE TWO:  SCORCHED EARTH. Wipe all keys, poison all cached data,
+//                corrupt alpha in memory with garbage. Self-destruct.
+//                Adversary is left holding noise. Evidence hashed to
+//                Ledger Lite before destruction. Law enforcement's job now.
+//
+// 100% legal. 100% ethical. We own it, we destroy it.
+// Like a bank vault that incinerates contents on tamper.
+// ════════════════════════════════════════════════════════════════════
+
+/** Strike level — escalating defensive response */
+export type StrikeLevel = "STRIKE_ONE" | "STRIKE_TWO";
+
+/** What triggered the strike */
+export type StrikeTrigger =
+  | "HANDSHAKE_FAILED"           // Wrong operatorToken (Five-Pound Note mismatch)
+  | "MUTUAL_VERIFY_FAILED"       // Wrong haloIdentityProof (forged dispatch credentials)
+  | "CHALLENGE_RESPONSE_FAILED"  // Wrong counter-challenge response
+  | "REPLAY_DETECTED"            // Token already used — clone attempt
+  | "TOKEN_NOT_FOUND"            // No dispatch record — completely forged
+  | "EXPIRED_CREDENTIAL";        // Expired token — stale captured credentials
+
+/** Scorched earth action taken during Strike Two */
+export type ScorchedEarthAction =
+  | "KEYS_WIPED"                 // All cryptographic keys destroyed
+  | "ALPHA_POISONED"             // Cached intel replaced with garbage data
+  | "STATE_CORRUPTED"            // Operator state overwritten with noise
+  | "ROUTES_DESTROYED"           // Endpoint routes/configs wiped
+  | "EVIDENCE_PRESERVED"         // SHA-256 hash of final state → Ledger Lite
+  | "SELF_DESTRUCTED";           // Operator terminated — empty shell remains
+
+/** Individual strike record */
+export interface StrikeRecord {
+  id: string;
+  operatorId: string;
+  missionId: string;
+  level: StrikeLevel;
+  trigger: StrikeTrigger;
+  /** Attempt details — forensic evidence for law enforcement */
+  attempt: {
+    /** What token/proof was presented (truncated for logging, not the full value) */
+    presentedCredentialHash: string;
+    /** Timestamp of the attempt */
+    attemptedAt: string;
+    /** Source IP if available */
+    sourceIp?: string;
+    /** Any operator class claimed */
+    claimedClass?: string;
+    /** Mission type claimed */
+    claimedMissionType?: string;
+  };
+  /** Scorched earth actions taken (Strike Two only) */
+  scorchedEarthActions?: ScorchedEarthAction[];
+  /** SHA-256 evidence hash preserved to Ledger Lite before destruction */
+  evidenceHash?: string;
+  /** Was the adversary detection forwarded to GTC for Brighton analysis? */
+  forwardedToGtc: boolean;
+  /** Was evidence preserved to Ledger Lite? */
+  forwardedToLedgerLite: boolean;
+  timestamp: string;
+}
+
+/** Scorched earth event — full record of a Strike Two destruction */
+export interface ScorchedEarthEvent {
+  operatorId: string;
+  missionId: string;
+  strikeRecordId: string;
+  /** All actions taken during scorched earth */
+  actions: ScorchedEarthAction[];
+  /** Data poisoned: how many bytes of garbage injected */
+  poisonedBytes: number;
+  /** Time from trigger to complete destruction */
+  destructionMs: number;
+  /** Evidence hash (SHA-256) — preserved before destruction */
+  evidenceHash: string;
+  /** What was preserved for law enforcement */
+  evidencePackage: {
+    attemptCount: number;
+    triggerHistory: StrikeTrigger[];
+    firstAttemptAt: string;
+    finalAttemptAt: string;
+    credentialHashes: string[];
+    sourceIps: string[];
+  };
+  timestamp: string;
 }

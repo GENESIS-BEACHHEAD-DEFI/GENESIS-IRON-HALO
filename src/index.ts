@@ -1,5 +1,5 @@
 /**
- * GENESIS-IRON-HALO v1.2 — Sandboxed Decontamination Chamber
+ * GENESIS-IRON-HALO v1.3 — Sandboxed Decontamination Chamber
  *
  * "All returning operators are contaminated by default."
  * "Even a hint of a clone or mistiming — BURN."
@@ -20,24 +20,28 @@
  *   DECOY:           Legacy decoy operators (backwards compat)
  *
  * v1.2: BLACKBOARD ARCHITECTURE — Two external Value Aligned AIs as forensic advisors.
- *   AI-A (Blue Team): Forensic Analyst — records WHY it chose each path
- *   AI-B (Red Team):  Adversarial Reviewer — finds weaknesses in Blue's logic
- *   Iron Halo v1.2:   Judge — reads both parcels, makes verdict
+ * v1.3: MUTUAL CRYPTOGRAPHIC HANDSHAKE + SEALED MISSION MANIFEST
  *
- *   THEY ARE ADVERSARIES. They never hear "Iron Halo". They never enter the core.
- *   Bidirectional anonymity enforced. Dead-drop communication. Parcel firewall.
- *   Circuit breaker. Dynamic per-mission schemas. Steel sharpening steel.
+ *   NEW SECURITY:
+ *   A. Mutual Handshake — operator verifies Iron Halo identity BEFORE delivering alpha.
+ *      Centurion Index signs both parties. Prevents adversary mirror attacks.
+ *   B. Sealed Mission Manifest — DARPA seals expected yield at dispatch.
+ *      Operator returns execution receipt. Reconciliation engine compares.
+ *      No skimming. No side-drops. No stashes.
  *
- * Full security pipeline:
- *   0. CLASS CHECK        — CHAOS_REGIMENT/PATSY rejected immediately (403)
- *   1. AI INSPECTION      — Behavioural analysis. Clone detection, timing.
- *   2. HANDSHAKE VERIFY   — Cryptographic five-pound note.
- *   3. QUARANTINE          — Operator isolated, flagged if suspicious.
- *   4. ADVISORY (v1.2)    — Blue Team → Firewall → Red Team → Firewall → Judge
- *   5. DEBRIEF             — Extract intelligence (KRYPTONITE: dynamic questioning).
- *   6. SANITISE            — Strip sensitive data.
- *   7. EXTRACT             — Forward clean intel to GTC/Brighton.
- *   8. BURN                — Operator destroyed. Zero fingerprint. No mission 2.
+ * Full security pipeline (v1.3):
+ *   0.  CLASS CHECK           — CHAOS_REGIMENT/PATSY rejected immediately (403)
+ *   0A. MUTUAL VERIFY (v1.3)  — Operator challenges Iron Halo identity before /return
+ *   1.  AI INSPECTION         — Behavioural analysis. Clone detection, timing.
+ *   2.  HANDSHAKE VERIFY      — Cryptographic five-pound note.
+ *   2A. CHALLENGE VERIFY (v1.3) — Operator counter-challenge response verified
+ *   3.  QUARANTINE            — Operator isolated, flagged if suspicious.
+ *   4.  ADVISORY (v1.2)       — Blue Team → Firewall → Red Team → Firewall → Judge
+ *   5.  DEBRIEF               — Extract intelligence (KRYPTONITE: dynamic questioning).
+ *   5A. RECONCILIATION (v1.3) — Sealed manifest vs execution receipt comparison
+ *   6.  SANITISE              — Strip sensitive data.
+ *   7.  EXTRACT               — Forward clean intel to GTC/Brighton.
+ *   8.  BURN                  — Operator destroyed. Zero fingerprint. No mission 2.
  *
  * GOLDEN RULE (LAW): ALL operators burned after mission. No exceptions.
  *
@@ -58,12 +62,14 @@ import { FirewallService } from "./services/advisory/firewall.service";
 import { CircuitBreakerService } from "./services/advisory/circuit-breaker.service";
 import { SchemaGeneratorService } from "./services/advisory/schema-generator.service";
 import { DeadMansSwitchService } from "./services/dead-mans-switch.service";
+import { ReconciliationService } from "./services/reconciliation.service";
+import { StrikeProtocolService } from "./services/strike-protocol.service";
 import { ParcelRendererService } from "./services/advisory/parcel-renderer.service";
 import { DecisionMatrixService } from "./services/advisory/decision-matrix.service";
 import { SimulationAnalystAdapter } from "./services/advisory/analyst-simulation.adapter";
 import { ApiAnalystAdapter } from "./services/advisory/analyst-api.adapter";
 import type { IAnalyst } from "./services/advisory/analyst.interface";
-import type { OperatorReturnReport, HaloRecord, AdvisoryVerdict } from "./types";
+import type { OperatorReturnReport, HaloRecord, AdvisoryVerdict, ExecutionReceipt } from "./types";
 
 const PORT = parseInt(process.env.PORT || "8680", 10);
 
@@ -88,6 +94,8 @@ const parcelRendererService = new ParcelRendererService();
 const decisionMatrixService = new DecisionMatrixService();
 
 const deadMansSwitch = new DeadMansSwitchService();
+const reconciliation = new ReconciliationService();
+const strikeProtocol = new StrikeProtocolService();
 
 const blackboard = ADVISORY_ENABLED
   ? new BlackboardService(
@@ -212,7 +220,8 @@ function immediateBurn(operatorId: string, missionId: string, reason: string, op
 }
 
 // ── POST /handshake/issue — DARPA issues handshake tokens before dispatch ──
-// Called by DARPA/Mothership when deploying an operator. Returns both halves.
+// Called by DARPA/Mothership when deploying an operator.
+// v1.3: Now returns mutual authentication tokens (Centurion-signed identity proofs).
 app.post("/handshake/issue", (req, res) => {
   const { operatorId, missionId, expiryMs } = req.body;
 
@@ -228,8 +237,147 @@ app.post("/handshake/issue", (req, res) => {
     operatorId,
     missionId,
     operatorToken: tokens.operatorToken,
+    // v1.3: Mutual authentication tokens — operator uses these to verify Iron Halo
+    haloIdentityProof: tokens.haloIdentityProof,
+    operatorIdentityProof: tokens.operatorIdentityProof,
+    centurionSeal: tokens.centurionSeal,
     // haloToken stays in Iron Halo — NEVER sent to the operator
-    message: "Handshake issued. Give operatorToken to operator. haloToken stays in vault.",
+    message: "Handshake issued with mutual auth. Give operatorToken + haloIdentityProof to operator. " +
+      "Operator must call /mutual/verify BEFORE /return to confirm Iron Halo identity.",
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// v1.3: MUTUAL CRYPTOGRAPHIC HANDSHAKE
+// "Before I deliver my alpha, prove you're Genesis."
+// Prevents adversary mirror attacks — fake endpoint stealing alpha.
+// ════════════════════════════════════════════════════════════════════
+
+// ── POST /mutual/verify — Operator challenges Iron Halo to prove identity ──
+app.post("/mutual/verify", (req, res) => {
+  const { operatorId, missionId, challengeNonce, expectedHaloProof } = req.body;
+
+  if (!operatorId || !missionId || !challengeNonce || !expectedHaloProof) {
+    res.status(400).json({
+      verified: false,
+      reason: "Required: operatorId, missionId, challengeNonce, expectedHaloProof",
+    });
+    return;
+  }
+
+  const result = handshake.verifyEndpointIdentity(
+    operatorId, missionId, challengeNonce, expectedHaloProof,
+  );
+
+  if (!result.verified) {
+    // ── v1.3.1: STRIKE PROTOCOL — track mutual verification failure ──
+    const strike = strikeProtocol.recordFailedAttempt(
+      operatorId, missionId, "MUTUAL_VERIFY_FAILED",
+      {
+        presentedCredential: expectedHaloProof,
+        sourceIp: req.ip,
+      },
+    );
+
+    res.status(403).json({
+      verified: false,
+      strikeLevel: strike.level,
+      reason: result.reason,
+      message: strike.level === "STRIKE_TWO"
+        ? "██ STRIKE TWO ██ SCORCHED EARTH EXECUTED. Operator destroyed. Do NOT transmit payload."
+        : "Iron Halo identity verification FAILED. Do NOT transmit payload. Strike recorded.",
+      scorchedEarth: strike.level === "STRIKE_TWO",
+    });
+    return;
+  }
+
+  res.status(200).json({
+    verified: true,
+    haloNonceSignature: result.haloNonceSignature,
+    operatorChallenge: result.operatorChallenge,
+    reason: result.reason,
+    message: "Iron Halo identity CONFIRMED via Centurion signature. " +
+      "You may now transmit payload via POST /return. " +
+      "Include challengeResponse (sign the operatorChallenge) to complete mutual auth.",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// v1.3: SEALED MISSION MANIFEST + YIELD RECONCILIATION
+// "What they earnt needs to tally with what was present at the start."
+// ════════════════════════════════════════════════════════════════════
+
+// ── POST /manifest/seal — DARPA seals expected parameters at dispatch ──
+app.post("/manifest/seal", (req, res) => {
+  const { operatorId, missionId, expected, toleranceBps } = req.body;
+
+  if (!operatorId || !missionId || !expected) {
+    res.status(400).json({
+      sealed: false,
+      reason: "Required: operatorId, missionId, expected (object with yield params)",
+    });
+    return;
+  }
+
+  const manifest = reconciliation.sealManifest(operatorId, missionId, expected, toleranceBps);
+
+  res.status(200).json({
+    sealed: true,
+    manifestId: manifest.manifestId,
+    operatorId,
+    missionId,
+    sealHash: manifest.sealHash,
+    toleranceBps: manifest.toleranceBps,
+    message: "Mission manifest sealed. Give manifestId to operator. " +
+      "Operator must return execution receipt for reconciliation.",
+  });
+});
+
+// ── POST /manifest/reconcile — Reconcile execution receipt against sealed manifest ──
+app.post("/manifest/reconcile", (req, res) => {
+  const receipt = req.body as ExecutionReceipt;
+
+  if (!receipt.manifestId || !receipt.operatorId || !receipt.missionId || !receipt.actual) {
+    res.status(400).json({
+      reconciled: false,
+      reason: "Required: manifestId, operatorId, missionId, actual (object with execution results)",
+    });
+    return;
+  }
+
+  const result = reconciliation.reconcile(receipt);
+
+  const statusCode = result.verdict === "TAMPERED" ? 403 : 200;
+  res.status(statusCode).json({
+    ...result,
+    message: result.verdict === "TAMPERED"
+      ? "██ MANIFEST TAMPERED ██ — Integrity compromised. Operator flagged for IMMEDIATE BURN."
+      : result.verdict === "SUSPICIOUS"
+      ? "SUSPICIOUS — Yield variance exceeds tolerance. Flagged for manual review."
+      : result.verdict === "VARIANCE_DETECTED"
+      ? "Minor variance detected. Within acceptable range but logged."
+      : "RECONCILED — All checks passed. Operator yield tallies with sealed manifest.",
+  });
+});
+
+// ── GET /manifest/:id — Get sealed manifest status ──
+app.get("/manifest/:id", (req, res) => {
+  const manifest = reconciliation.getManifest(req.params.id);
+  if (!manifest) {
+    res.status(404).json({ found: false, id: req.params.id });
+    return;
+  }
+  res.json({ found: true, manifest });
+});
+
+// ── GET /reconciliation — Recent reconciliation results ──
+app.get("/reconciliation", (req, res) => {
+  const limit = parseInt(req.query.limit as string || "50", 10);
+  res.json({
+    stats: reconciliation.getStats(),
+    recentResults: reconciliation.getRecentResults(limit),
+    message: "Sealed mission manifest reconciliation — no skimming, no side-drops.",
   });
 });
 
@@ -399,16 +547,24 @@ app.post("/return", (req, res) => {
   const operatorToken = body.operatorToken as string;
 
   if (!operatorToken) {
+    // ── v1.3.1: STRIKE PROTOCOL — track failed attempt ──
+    const strike = strikeProtocol.recordFailedAttempt(
+      report.operatorId, report.missionId, "TOKEN_NOT_FOUND",
+      { sourceIp: req.ip, claimedClass: report.operatorClass, claimedMissionType: report.missionType },
+    );
+
     immediateBurn(
       report.operatorId,
       report.missionId,
-      "NO_HANDSHAKE_TOKEN — Operator returned without cryptographic token.",
+      `NO_HANDSHAKE_TOKEN — ${strike.level}. ` +
+      (strike.level === "STRIKE_TWO" ? "SCORCHED EARTH EXECUTED." : "Dark mode. Watching."),
       report.operatorClass,
     );
 
     res.status(403).json({
       accepted: false,
       burned: true,
+      strikeLevel: strike.level,
       reason: "NO_TOKEN — Operator returned without handshake token. Immediate burn.",
     });
     return;
@@ -421,17 +577,36 @@ app.post("/return", (req, res) => {
   );
 
   if (!handshakeResult.valid) {
+    // ── v1.3.1: STRIKE PROTOCOL — determine trigger type from failure reason ──
+    let strikeTrigger: import("./types").StrikeTrigger = "HANDSHAKE_FAILED";
+    if (handshakeResult.reason.includes("REPLAY")) strikeTrigger = "REPLAY_DETECTED";
+    else if (handshakeResult.reason.includes("EXPIRED")) strikeTrigger = "EXPIRED_CREDENTIAL";
+    else if (handshakeResult.reason.includes("NO_TOKEN_FOUND")) strikeTrigger = "TOKEN_NOT_FOUND";
+
+    const strike = strikeProtocol.recordFailedAttempt(
+      report.operatorId, report.missionId, strikeTrigger,
+      {
+        presentedCredential: operatorToken,
+        sourceIp: req.ip,
+        claimedClass: report.operatorClass,
+        claimedMissionType: report.missionType,
+      },
+    );
+
     immediateBurn(
       report.operatorId,
       report.missionId,
-      `HANDSHAKE_FAILED: ${handshakeResult.reason}`,
+      `HANDSHAKE_FAILED: ${handshakeResult.reason} — ${strike.level}` +
+      (strike.level === "STRIKE_TWO" ? " — SCORCHED EARTH EXECUTED." : " — Dark mode."),
       report.operatorClass,
     );
 
     res.status(403).json({
       accepted: false,
       burned: true,
+      strikeLevel: strike.level,
       reason: `HANDSHAKE_FAILED — ${handshakeResult.reason}`,
+      scorchedEarth: strike.level === "STRIKE_TWO",
     });
     return;
   }
@@ -547,11 +722,11 @@ app.get("/health", (_req, res) => {
 
   res.json({
     service: "genesis-iron-halo",
-    version: "1.2",
+    version: "1.3",
     status: quarantine.getQueueSize() > 50 ? "AMBER" : "GREEN",
     lockdown: deadMansSwitch.getStatus().status,
     role: "SANDBOXED_DECONTAMINATION_CHAMBER",
-    doctrine: "Contaminated by default. Five-pound note doctrine. We protect what we love.",
+    doctrine: "Contaminated by default. Five-pound note + mutual auth. Sealed manifests. We protect what we love.",
     operatorClasses: ["PAYLOAD", "DECOY", "RECON", "CHAOS_REGIMENT", "DEEP_COVER", "PHANTOM_STACK", "PATSY"],
     security: {
       handshake: handshakeStats,
@@ -572,6 +747,8 @@ app.get("/health", (_req, res) => {
           state: blackboard.getState(),
         }
       : { enabled: false },
+    reconciliation: reconciliation.getStats(),
+    strikeProtocol: strikeProtocol.getStats(),
     completedHistory: completedRecords.length,
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
@@ -739,6 +916,39 @@ app.get("/advisory/firewall", (req, res) => {
 });
 
 // ════════════════════════════════════════════════
+// v1.3.1: STRIKE PROTOCOL — Defensive Self-Destruct
+// "We destroy what is ours. We defend what we love."
+// ════════════════════════════════════════════════
+
+// ── GET /strikes — Strike Protocol log: failed attempts + scorched earth events ──
+app.get("/strikes", (req, res) => {
+  const limit = parseInt(req.query.limit as string || "50", 10);
+
+  res.json({
+    protocol: "STRIKE_PROTOCOL",
+    doctrine: "Strike One: dark mode. Strike Two: scorched earth. We destroy what is ours.",
+    legal: "100% defensive. We own it, we destroy it. We do NOT touch adversary systems.",
+    stats: strikeProtocol.getStats(),
+    recentStrikes: strikeProtocol.getRecentStrikes(limit),
+    message: strikeProtocol.getStats().totalStrikeTwos > 0
+      ? `██ ${strikeProtocol.getStats().totalStrikeTwos} scorched earth event(s). Adversary got nothing but noise.`
+      : "No scorched earth events. Strike protocol armed and watching.",
+  });
+});
+
+// ── GET /strikes/scorched-earth — Scorched earth event detail ──
+app.get("/strikes/scorched-earth", (req, res) => {
+  const limit = parseInt(req.query.limit as string || "20", 10);
+
+  res.json({
+    protocol: "SCORCHED_EARTH",
+    doctrine: "Keys wiped. Alpha poisoned. State corrupted. Routes destroyed. Evidence preserved. Self-destructed.",
+    events: strikeProtocol.getScorchedEarthEvents(limit),
+    total: strikeProtocol.getStats().totalScorchedEarth,
+  });
+});
+
+// ════════════════════════════════════════════════
 // DEAD MAN'S SWITCH — Advisory AI probe detection
 // "If they're curious about the vault, burn everything."
 // ════════════════════════════════════════════════
@@ -840,10 +1050,10 @@ app.post("/red-team/ingest", (req, res) => {
 
 // ── Start ──
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[IRON-HALO] Genesis Iron Halo v1.2 listening on port ${PORT}`);
+  console.log(`[IRON-HALO] Genesis Iron Halo v1.3 listening on port ${PORT}`);
   console.log(`[IRON-HALO] Role: SANDBOXED_DECONTAMINATION_CHAMBER`);
   console.log(`[IRON-HALO] Network: ISOLATED — cannot reach core systems`);
-  console.log(`[IRON-HALO] Security: HANDSHAKE (five-pound note) + AI INSPECTION (clone/timing)`);
+  console.log(`[IRON-HALO] Security: MUTUAL HANDSHAKE (Centurion) + FIVE-POUND NOTE + AI INSPECTION + YIELD RECONCILIATION`);
   console.log(`[IRON-HALO] Operator Classes: PAYLOAD | DECOY | RECON | CHAOS_REGIMENT | DEEP_COVER | PHANTOM_STACK | PATSY`);
   console.log(`[IRON-HALO] CHAOS_REGIMENT: 403 immediate burn on return (self-destruct class)`);
   console.log(`[IRON-HALO] PHANTOM_STACK: KRYPTONITE debrief protocol (dynamic questioning)`);
@@ -857,11 +1067,15 @@ app.listen(PORT, "0.0.0.0", () => {
     console.log(`[IRON-HALO] They are ADVERSARIES. They never hear "Iron Halo". Bidirectional anonymity.`);
     console.log(`[IRON-HALO] Parcel Firewall: 7 rules. Circuit Breaker: per-analyst. Dead-Drop: one-way.`);
     console.log(`[IRON-HALO] Self-sharpening: Steel sharpening steel — three AIs, all data, full picture.`);
-    console.log(`[IRON-HALO] Pipeline: CLASS_CHECK → INSPECT → HANDSHAKE → QUARANTINE → ADVISORY → DEBRIEF → SANITISE → EXTRACT → BURN`);
+    console.log(`[IRON-HALO] Pipeline: CLASS_CHECK → MUTUAL_VERIFY → INSPECT → HANDSHAKE → QUARANTINE → ADVISORY → DEBRIEF → RECONCILE → SANITISE → EXTRACT → BURN`);
   } else {
     console.log(`[IRON-HALO] Advisory: DISABLED (set ADVISORY_ENABLED=true to activate Blackboard Architecture)`);
-    console.log(`[IRON-HALO] Pipeline: CLASS_CHECK → INSPECT → HANDSHAKE → QUARANTINE → DEBRIEF → SANITISE → EXTRACT → BURN`);
+    console.log(`[IRON-HALO] Pipeline: CLASS_CHECK → MUTUAL_VERIFY → INSPECT → HANDSHAKE → QUARANTINE → DEBRIEF → RECONCILE → SANITISE → EXTRACT → BURN`);
   }
+  console.log(`[IRON-HALO] ██ v1.3 MUTUAL AUTH ██ Centurion-signed identity proofs. Operator verifies Iron Halo BEFORE delivering alpha.`);
+  console.log(`[IRON-HALO] ██ v1.3 SEALED MANIFEST ██ DARPA seals expected yield. Reconciliation catches skimming + side-drops.`);
+  console.log(`[IRON-HALO] ██ v1.3.1 STRIKE PROTOCOL ██ Strike One=dark mode. Strike Two=SCORCHED EARTH. We destroy what is ours.`);
+  console.log(`[IRON-HALO] Strike threshold: ${process.env.STRIKE_TWO_THRESHOLD || "2"} failed attempts. Evidence → Ledger Lite. Law enforcement's job after that.`);
   console.log(`[IRON-HALO] DEAD_MANS_SWITCH: Active — threshold=${process.env.DEAD_MANS_SWITCH_THRESHOLD || "3"} probes = LOCKDOWN`);
   console.log(`[IRON-HALO] "If they're curious about the vault, burn everything."`);
   console.log(`[IRON-HALO] GOLDEN RULE: ALL operators burned. No mission 2. No exceptions.`);
